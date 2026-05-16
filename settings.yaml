@@ -1,0 +1,72 @@
+shipping:
+  default_handling_days: 2
+  default_model: calculated_buyer_paid
+  domestic_enabled: true
+  international_enabled: false
+  default_estimated_shipping_cost: 9.50
+  packaging_reserve: 1.50
+  signature_required_order_total: 750
+
+returns:
+  default_policy: 30_day_buyer_paid
+  no_return_categories:
+    - parts_not_working
+    - as_is_electronics
+    - uncertain_authenticity
+
+photos:
+  min_count: 6
+  recommended_count: 10
+  min_long_edge_px: 1600
+  min_count_by_category:
+    clothing: 3
+    electronics: 5
+    sneakers: 6
+    accessories: 3
+    general: 4
+  required_angles:
+    sneakers:
+      - front
+      - back
+      - left
+      - right
+      - outsole
+      - size_tag
+      - box_label
+      - defects
+    electronics:
+      - front
+      - back
+      - ports
+      - powered_on
+      - accessories
+      - defects
+    clothing:
+      - front
+      - back
+      - tag
+      - measurements
+      - defects
+
+fees:
+  default_final_value_rate: 0.136
+  per_order_fee_over_10: 0.40
+  per_order_fee_10_or_less: 0.30
+  insertion_fee_default: 0.00
+  promoted_listing_rate_default: 0.00
+  risk_reserve:
+    sneakers: 0.01
+    clothing: 0.01
+    electronics_used: 0.03
+    default: 0.02
+
+strategy:
+  default_listing_format: BUY_IT_NOW
+  default_pricing_mode: MARKET
+  aggressive_discount_from_avg_sold: 0.12
+  market_discount_from_avg_sold: 0.05
+  minimum_profit_dollars: 25
+  minimum_roi_for_owned_inventory: 0.20
+  target_roi_for_sourcing: 0.50
+  target_sell_through_days: 30
+  high_velocity_days: 7

@@ -1,0 +1,10 @@
+.env
+.pycache/
+__pycache__/
+*.py[cod]
+
+data/*.db
+data/*.db-*
+tmp_drop/
+
+.DS_Store

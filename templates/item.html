@@ -1,0 +1,164 @@
+<section class="item-hero">
+  <div>
+    <a class="back" href="/">Back</a>
+    <p class="eyebrow">{{ status }}</p>
+    <h1>{{ folder_name }}</h1>
+    <p>{{ brand }} {{ model }} {{ color }} {{ size }}</p>
+  </div>
+  <form method="post" action="/status" class="status-form">
+    <input type="hidden" name="id" value="{{ id }}">
+    <select name="status">{{ status_options }}</select>
+    <button>Update</button>
+  </form>
+</section>
+
+<section class="columns">
+  <div class="panel">
+    <h2>Editable Item Fields</h2>
+    <form method="post" action="/item" class="form-grid">
+      <input type="hidden" name="id" value="{{ id }}">
+      <label>Brand<input name="brand" value="{{ brand }}"></label>
+      <label>Model<input name="model" value="{{ model }}"></label>
+      <label>Style code<input name="style_code" value="{{ style_code }}"></label>
+      <label>UPC<input name="upc" value="{{ upc }}"></label>
+      <label>Category<input name="category" value="{{ category }}"></label>
+      <label>Item type<input name="item_type" value="{{ item_type }}"></label>
+      <label>Size<input name="size" value="{{ size }}"></label>
+      <label>Color<input name="color" value="{{ color }}"></label>
+      <label>Condition<input name="condition" value="{{ condition }}"></label>
+      <label>Package/box<input name="box" value="{{ box }}"></label>
+      <label>Accessories<input name="accessories" value="{{ accessories }}"></label>
+      <label>Tested<input name="tested" value="{{ tested }}"></label>
+      <label>Defects<input name="defects" value="{{ defects }}"></label>
+      <label>COGS<input name="cogs" value="{{ cogs }}" inputmode="decimal"></label>
+      <label class="wide">Notes<textarea name="notes">{{ notes }}</textarea></label>
+      <button class="wide">Save Item Fields</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Photos</h2>
+    <p>{{ photo_count }}</p>
+    {{ photo_warning }}
+    <form method="post" action="/photos">
+      <input type="hidden" name="id" value="{{ id }}">
+      <div class="photo-grid">{{ photo_cards }}</div>
+      <button class="wide">Save Cover Photo</button>
+    </form>
+    <h3>Angle Checklist</h3>
+    <ul class="photo-list">{{ required_angle_list }}</ul>
+  </div>
+</section>
+
+<section class="columns">
+  <div class="panel">
+    <h2>Market Comps</h2>
+    <div class="action-row">
+      <a class="button secondary" href="/research?id={{ id }}">Auto Research eBay</a>
+      <span>Best-effort web lookup. You can override the numbers below.</span>
+    </div>
+    <form method="post" action="/market" class="form-grid">
+      <input type="hidden" name="id" value="{{ id }}">
+      <label>30-day avg sold<input name="avg_sold_price" value="{{ avg_sold_price }}" inputmode="decimal"></label>
+      <label>Median sold<input name="median_sold_price" value="{{ median_sold_price }}" inputmode="decimal"></label>
+      <label>Sold low<input name="sold_price_low" value="{{ sold_price_low }}" inputmode="decimal"></label>
+      <label>Sold high<input name="sold_price_high" value="{{ sold_price_high }}" inputmode="decimal"></label>
+      <label>Expected sale price<input name="expected_sale_price" value="{{ expected_sale_price }}" inputmode="decimal"></label>
+      <label>Active listings<input name="active_count" value="{{ active_count }}" inputmode="numeric"></label>
+      <label>Sold count 30d<input name="sold_count_30d" value="{{ sold_count_30d }}" inputmode="numeric"></label>
+      <label>Seller-paid shipping cost<input name="shipping_cost" value="{{ shipping_cost }}" inputmode="decimal"></label>
+      <label>Market confidence<input name="confidence" value="{{ market_confidence }}"></label>
+      <label class="wide">Comp notes<textarea name="notes">{{ market_notes }}</textarea></label>
+      <button class="wide">Save Market Snapshot</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Research Output</h2>
+    <dl>
+      <dt>Confidence</dt><dd>{{ market_confidence }}</dd>
+      <dt>Score</dt><dd>{{ confidence_score }}/100</dd>
+      <dt>Sold sample</dt><dd>{{ sampled_sold_count }}</dd>
+      <dt>Filtered sold</dt><dd>{{ filtered_sold_count }}</dd>
+      <dt>Active sample</dt><dd>{{ sampled_active_count }}</dd>
+      <dt>Pressure</dt><dd>{{ active_vs_sold_pressure }}</dd>
+      <dt>Review links</dt><dd>{{ active_review_link }}<br>{{ sold_review_link }}</dd>
+    </dl>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Local Sale Tracking</p>
+      <h2>Actual Profit</h2>
+    </div>
+    <p>{{ actual_profit }}</p>
+  </div>
+  <form method="post" action="/sale" class="form-grid">
+    <input type="hidden" name="id" value="{{ id }}">
+    <label>Sale price<input name="sale_price" value="{{ sale_price }}" inputmode="decimal"></label>
+    <label>Actual eBay fees<input name="actual_ebay_fees" value="{{ actual_ebay_fees }}" inputmode="decimal"></label>
+    <label>Actual shipping cost<input name="actual_shipping_cost" value="{{ actual_shipping_cost }}" inputmode="decimal"></label>
+    <label>Sold date<input name="sold_at" value="{{ sold_at }}" placeholder="YYYY-MM-DD"></label>
+    <label class="wide">Sale notes<textarea name="sale_notes">{{ sale_notes }}</textarea></label>
+    <button class="wide">Mark Sold / Save Sale</button>
+  </form>
+</section>
+
+<section class="panel recommendation">
+  <div>
+    <p class="eyebrow">Recommendation</p>
+    <h2>{{ decision }}</h2>
+    <p>{{ rationale }}</p>
+  </div>
+  <div class="metrics">
+    <div><span>Price</span><strong>{{ suggested_price }}</strong></div>
+    <div><span>Profit</span><strong>{{ estimated_profit }}</strong></div>
+    <div><span>ROI</span><strong>{{ roi }}</strong></div>
+    <div><span>Sell-through</span><strong>{{ sell_through }}</strong></div>
+    <div><span>Fees</span><strong>{{ fees }}</strong></div>
+    <div><span>Risk reserve</span><strong>{{ risk_reserve }}</strong></div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Listing Package</p>
+      <h2>Copy-Paste Listing</h2>
+    </div>
+    <p>{{ shipping_defaults }} | Returns: {{ returns_defaults }}</p>
+  </div>
+  <div class="listing-grid">
+    <div>
+      <h3>Recommended Title</h3>
+      <textarea class="copy-box" readonly>{{ draft_title }}</textarea>
+    </div>
+    <div>
+      <h3>Recommended Price</h3>
+      <div class="price-card">{{ suggested_price }}</div>
+    </div>
+    <div>
+      <h3>Profit Summary</h3>
+      <dl>
+        <dt>Estimated profit</dt><dd>{{ estimated_profit }}</dd>
+        <dt>ROI</dt><dd>{{ roi }}</dd>
+        <dt>Fees</dt><dd>{{ fees }}</dd>
+        <dt>Packaging</dt><dd>{{ packaging_reserve }}</dd>
+      </dl>
+    </div>
+    <div>
+      <h3>Warning Checklist</h3>
+      <ul class="warning-list">{{ warning_list }}</ul>
+    </div>
+    <div>
+      <h3>Readable Preview</h3>
+      <textarea class="copy-box tall" readonly>{{ plain_description }}</textarea>
+    </div>
+    <div>
+      <h3>Copy-Ready eBay HTML</h3>
+      <textarea class="copy-box tall" readonly>{{ draft_description }}</textarea>
+    </div>
+  </div>
+</section>
