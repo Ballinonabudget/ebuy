@@ -9,6 +9,15 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import app_config
 from .db import connect, row, rows
+from .ebay_api import (
+    EbayApiError,
+    EbayConfigError,
+    browse_active_listings,
+    build_publish_plan,
+    publish_live,
+    readiness as ebay_readiness,
+    upload_media_image_from_file,
+)
 from .intake import scan_drop_zone
 from .market import research_item
 from .recommend import latest_recommendation
@@ -226,9 +235,9 @@ def audit_capabilities() -> list[dict]:
         },
         {
             "surface": "Active competition table",
-            "status": "data-ready",
-            "source": "market_competition table",
-            "notes": "UI now renders real rows when inserted. Current scraper stores counts/URLs but not per-listing rows yet.",
+            "status": "wired-api-ready",
+            "source": "market_competition table + eBay Browse API",
+            "notes": "Stores per-listing active comps when EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are configured. Manual POST rows still work.",
         },
         {
             "surface": "Sold-comp chart",
@@ -238,11 +247,39 @@ def audit_capabilities() -> list[dict]:
         },
         {
             "surface": "Publish to eBay",
-            "status": "not-available",
-            "source": "none",
-            "notes": "No eBay OAuth/listing API exists yet; Approve & list records local status only.",
+            "status": "dry-run-ready",
+            "source": "POST /api/items/{id}/publish",
+            "notes": "Builds Inventory API payloads and missing-field checks. Live publish is gated behind seller OAuth, policy IDs, public images, and confirm_live=true.",
+        },
+        {
+            "surface": "Listing preview",
+            "status": "wired-client",
+            "source": "draft form + local photo URLs",
+            "notes": "Renders the current draft as an eBay-style preview before saving or publishing.",
         },
     ]
+
+
+def photo_rows(conn, item_id: int) -> list[dict]:
+    return rows(
+        conn,
+        """
+        SELECT
+          photos.*,
+          photo_publications.public_url AS ebay_public_url,
+          photo_publications.use_by_date AS ebay_use_by_date,
+          photo_publications.uploaded_at AS ebay_uploaded_at,
+          photo_publications.error AS ebay_upload_error
+        FROM photos
+        LEFT JOIN photo_publications
+          ON photo_publications.photo_id = photos.id
+          AND photo_publications.provider = 'ebay_media'
+          AND photo_publications.ebay_env = ?
+        WHERE photos.item_id = ?
+        ORDER BY photos.role = 'cover' DESC, photos.sort_order, photos.filename
+        """,
+        (CONFIG["ebay"].get("env") or "sandbox", item_id),
+    )
 
 
 def confidence_ratio(market: dict | None, item: dict) -> float:
@@ -319,6 +356,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_items()
         if parsed.path == "/api/audit":
             return self.api_audit()
+        if parsed.path == "/api/ebay/status":
+            return self.api_ebay_status()
         if parsed.path.startswith("/api/items/"):
             return self.api_item(parsed.path)
         if parsed.path == "/":
@@ -397,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def item_payload(self, conn, item: dict, full: bool = False) -> dict:
         item_id = int(item["id"])
-        photos = rows(conn, "SELECT * FROM photos WHERE item_id = ? ORDER BY role = 'cover' DESC, sort_order, filename", (item_id,))
+        photos = photo_rows(conn, item_id)
         market = latest_row(conn, "market_snapshots", item_id)
         draft = row(conn, "SELECT * FROM listing_drafts WHERE item_id = ?", (item_id,))
         sale = latest_row(conn, "sales", item_id)
@@ -409,6 +448,9 @@ class Handler(BaseHTTPRequestHandler):
         sell_through = dollars(rec.get("sell_through_rate")) * 100
         conf = confidence_ratio(market, item)
         photo_urls = [f"/photo?id={photo['id']}" for photo in photos]
+        existing_photo_count = sum(1 for photo in photos if Path(photo["path"]).exists())
+        missing_photo_count = max(0, len(photos) - existing_photo_count)
+        ebay_photo_count = sum(1 for photo in photos if str(photo.get("ebay_public_url") or "").startswith("https://"))
         defects = [part.strip() for part in str(item.get("defects") or "").split(",") if part.strip()]
         payload = {
             "id": str(item_id),
@@ -429,6 +471,9 @@ class Handler(BaseHTTPRequestHandler):
             "color": item.get("color") or "",
             "conf": conf,
             "photos": len(photos),
+            "existingPhotos": existing_photo_count,
+            "missingPhotos": missing_photo_count,
+            "ebayPhotos": ebay_photo_count,
             "photoUrls": photo_urls,
             "defects": defects,
             "cogs": dollars(item.get("cogs")),
@@ -514,6 +559,12 @@ class Handler(BaseHTTPRequestHandler):
                     "conf": conf,
                     "agentLog": [
                         {"line": f"Imported {len(photos)} photo records from drop zone", "severity": "info"},
+                        {"line": f"{ebay_photo_count} photo(s) uploaded to eBay Media API for {CONFIG['ebay'].get('env')}", "severity": "info" if ebay_photo_count else "warn"},
+                        *(
+                            [{"line": f"{missing_photo_count} photo file(s) are missing from saved paths", "severity": "warn"}]
+                            if missing_photo_count
+                            else []
+                        ),
                         {"line": f"Mapped gist fields to {payload['brand']} {payload['model']}", "severity": "info"},
                         {"line": f"Market confidence: {market_payload['confidence']} ({market_payload['confidenceScore']}/100)", "severity": "warn" if conf < 0.6 else "info"},
                     ],
@@ -565,6 +616,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_audit(self):
         self.respond_json({"capabilities": audit_capabilities()})
+
+    def api_ebay_status(self):
+        self.respond_json({"ebay": ebay_readiness(CONFIG["ebay"])})
 
     def api_items(self):
         with connect(CONFIG["database_path"]) as conn:
@@ -647,7 +701,27 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("UPDATE items SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (status, item_id))
             elif action == "research":
                 result = research_item(item, CONFIG["settings"])
-                self.save_market_snapshot(conn, item_id, result)
+                competition = []
+                try:
+                    browse = browse_active_listings(item, CONFIG["ebay"])
+                    competition = browse["listings"]
+                    result["active_count"] = browse["activeCount"] or result.get("active_count")
+                    result["sampled_active_count"] = len(competition)
+                    result["active_url"] = browse["searchUrl"]
+                    result["query"] = browse["query"] or result.get("query")
+                    result["notes"] = "\n".join(
+                        [
+                            result.get("notes") or "",
+                            f"eBay Browse API returned {len(competition)} active listing rows for competition review.",
+                        ]
+                    ).strip()
+                except EbayConfigError as exc:
+                    result["notes"] = "\n".join([result.get("notes") or "", f"Browse API not configured: {exc}"]).strip()
+                except EbayApiError as exc:
+                    result["notes"] = "\n".join([result.get("notes") or "", f"Browse API failed: {exc}"]).strip()
+                snapshot_id = self.save_market_snapshot(conn, item_id, result)
+                if competition:
+                    self.replace_api_competition(conn, item_id, snapshot_id, competition)
             elif action == "cover":
                 photo_id = integer(data.get("photo_id"))
                 conn.execute("UPDATE photos SET role = NULL WHERE item_id = ?", (item_id,))
@@ -725,6 +799,36 @@ class Handler(BaseHTTPRequestHandler):
                     inserted += 1
                 if inserted:
                     conn.execute("UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (item_id,))
+            elif action == "publish":
+                photos = photo_rows(conn, item_id)
+                draft = self.effective_draft(conn, item, data)
+                if data.get("confirm_live") is True:
+                    try:
+                        result = publish_live(item, draft, photos, CONFIG["ebay"])
+                    except (EbayConfigError, EbayApiError) as exc:
+                        self.respond_json({"error": str(exc), "publish": build_publish_plan(item, draft, photos, CONFIG["ebay"])}, 400)
+                        return
+                    conn.execute("UPDATE items SET status = 'listed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (item_id,))
+                    conn.commit()
+                    updated = row(conn, "SELECT * FROM items WHERE id = ?", (item_id,))
+                    self.respond_json({"item": self.item_payload(conn, updated, full=True), "publish": result})
+                    return
+                self.respond_json({"item": self.item_payload(conn, item, full=True), "publish": build_publish_plan(item, draft, photos, CONFIG["ebay"])})
+                return
+            elif action == "upload-photos":
+                result = self.upload_item_photos(conn, item_id)
+                conn.commit()
+                updated = row(conn, "SELECT * FROM items WHERE id = ?", (item_id,))
+                photos = photo_rows(conn, item_id)
+                draft = self.effective_draft(conn, updated, data)
+                self.respond_json(
+                    {
+                        "item": self.item_payload(conn, updated, full=True),
+                        "upload": result,
+                        "publish": build_publish_plan(updated, draft, photos, CONFIG["ebay"]),
+                    }
+                )
+                return
             else:
                 self.respond_json({"error": "Unsupported action"}, 400)
                 return
@@ -777,12 +881,7 @@ class Handler(BaseHTTPRequestHandler):
             if not item:
                 self.send_error(404)
                 return
-            photos = rows(conn, "SELECT * FROM photos WHERE item_id = ? ORDER BY filename", (item_id,))
-            photos = rows(
-                conn,
-                "SELECT * FROM photos WHERE item_id = ? ORDER BY role = 'cover' DESC, sort_order, filename",
-                (item_id,),
-            )
+            photos = photo_rows(conn, item_id)
             market = row(
                 conn,
                 "SELECT * FROM market_snapshots WHERE item_id = ? ORDER BY id DESC LIMIT 1",
@@ -911,8 +1010,46 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
-    def save_market_snapshot(self, conn, item_id: int, values: dict):
-        conn.execute(
+    def effective_draft(self, conn, item: dict, overrides: dict | None = None) -> dict:
+        draft = row(conn, "SELECT * FROM listing_drafts WHERE item_id = ?", (item["id"],)) or {}
+        rec = latest_recommendation(item, latest_row(conn, "market_snapshots", item["id"]), CONFIG["settings"])
+        result = {
+            "title": draft.get("title") or rec.get("title") or "",
+            "description": draft.get("description") or rec.get("description") or "",
+            "category": draft.get("category") or item.get("category") or "general",
+            "shipping_service": draft.get("shipping_service") or CONFIG["settings"]["shipping"]["default_model"],
+            "format_kind": draft.get("format_kind") or "fixed",
+            "start_price": dollars(draft.get("start_price")) or dollars(rec.get("suggested_price")),
+        }
+        overrides = overrides or {}
+        for key in ["title", "description", "category", "shipping_service", "format_kind", "start_price"]:
+            if key in overrides and overrides[key] not in {None, ""}:
+                result[key] = overrides[key]
+        return result
+
+    def replace_api_competition(self, conn, item_id: int, snapshot_id: int | None, listings: list[dict]):
+        conn.execute("DELETE FROM market_competition WHERE item_id = ? AND source = 'ebay_browse'", (item_id,))
+        for listing in listings[:20]:
+            conn.execute(
+                """
+                INSERT INTO market_competition (
+                  item_id, snapshot_id, title, condition, price, watchers, url, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    snapshot_id,
+                    str(listing.get("title") or ""),
+                    str(listing.get("condition") or ""),
+                    dollars(listing.get("price")),
+                    integer(listing.get("watchers")),
+                    str(listing.get("url") or ""),
+                    str(listing.get("source") or "ebay_browse"),
+                ),
+            )
+
+    def save_market_snapshot(self, conn, item_id: int, values: dict) -> int:
+        cursor = conn.execute(
             """
             INSERT INTO market_snapshots (
               item_id, avg_sold_price, median_sold_price, sold_price_low,
@@ -943,8 +1080,75 @@ class Handler(BaseHTTPRequestHandler):
                 values.get("notes") or "",
             ),
         )
+        snapshot_id = int(cursor.lastrowid)
         self.persist_recommendation(conn, item_id)
         conn.execute("UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (item_id,))
+        return snapshot_id
+
+    def upload_item_photos(self, conn, item_id: int) -> dict:
+        env = CONFIG["ebay"].get("env") or "sandbox"
+        photos = photo_rows(conn, item_id)
+        result = {"provider": "ebay_media", "env": env, "uploaded": 0, "skipped": 0, "failed": 0, "photos": []}
+        for photo in photos[:24]:
+            existing_url = str(photo.get("ebay_public_url") or "")
+            if existing_url.startswith("https://"):
+                result["skipped"] += 1
+                result["photos"].append({"id": photo["id"], "filename": photo.get("filename"), "status": "skipped", "url": existing_url})
+                continue
+            if not Path(photo["path"]).exists():
+                error = "Source photo file is missing from the drop zone path."
+                result["failed"] += 1
+                self.save_photo_publication_error(conn, photo, env, error)
+                result["photos"].append({"id": photo["id"], "filename": photo.get("filename"), "status": "failed", "error": error})
+                continue
+            try:
+                upload = upload_media_image_from_file(photo, CONFIG["ebay"])
+            except (EbayConfigError, EbayApiError) as exc:
+                error = str(exc)
+                result["failed"] += 1
+                self.save_photo_publication_error(conn, photo, env, error)
+                result["photos"].append({"id": photo["id"], "filename": photo.get("filename"), "status": "failed", "error": error})
+                continue
+            public_url = upload["publicUrl"]
+            conn.execute(
+                """
+                INSERT INTO photo_publications (
+                  photo_id, provider, ebay_env, public_url, use_by_date, uploaded_at, error
+                ) VALUES (?, 'ebay_media', ?, ?, ?, CURRENT_TIMESTAMP, NULL)
+                ON CONFLICT(photo_id, provider, ebay_env) DO UPDATE SET
+                  public_url = excluded.public_url,
+                  use_by_date = excluded.use_by_date,
+                  uploaded_at = CURRENT_TIMESTAMP,
+                  error = NULL
+                """,
+                (photo["id"], env, public_url, upload.get("useByDate") or ""),
+            )
+            result["uploaded"] += 1
+            result["photos"].append(
+                {
+                    "id": photo["id"],
+                    "filename": photo.get("filename"),
+                    "status": "uploaded",
+                    "url": public_url,
+                    "useByDate": upload.get("useByDate") or "",
+                }
+            )
+        if result["uploaded"]:
+            conn.execute("UPDATE items SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (item_id,))
+        return result
+
+    def save_photo_publication_error(self, conn, photo: dict, env: str, error: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO photo_publications (
+              photo_id, provider, ebay_env, public_url, use_by_date, uploaded_at, error
+            ) VALUES (?, 'ebay_media', ?, '', NULL, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(photo_id, provider, ebay_env) DO UPDATE SET
+              error = excluded.error,
+              uploaded_at = CURRENT_TIMESTAMP
+            """,
+            (photo["id"], env, error[:1000]),
+        )
 
     def research(self, item_id: int):
         with connect(CONFIG["database_path"]) as conn:

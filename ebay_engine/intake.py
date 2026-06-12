@@ -71,6 +71,32 @@ def find_gist(folder: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def import_folder_photos(conn: sqlite3.Connection, item_id: int, folder: Path) -> int:
+    existing_paths = {
+        row["path"]
+        for row in conn.execute(
+            "SELECT path FROM photos WHERE item_id = ?",
+            (item_id,),
+        ).fetchall()
+    }
+    current_max = conn.execute(
+        "SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM photos WHERE item_id = ?",
+        (item_id,),
+    ).fetchone()["max_sort"]
+    inserted = 0
+    for index, photo in enumerate(sorted(p for p in folder.iterdir() if p.suffix.lower() in PHOTO_EXTENSIONS)):
+        photo_path = str(photo)
+        if photo_path in existing_paths:
+            continue
+        conn.execute(
+            "INSERT INTO photos (item_id, path, filename, sort_order) VALUES (?, ?, ?, ?)",
+            (item_id, photo_path, photo.name, current_max + inserted + index + 1),
+        )
+        existing_paths.add(photo_path)
+        inserted += 1
+    return inserted
+
+
 def scan_drop_zone(conn: sqlite3.Connection, drop_zone: Path) -> dict:
     drop_zone.mkdir(parents=True, exist_ok=True)
     imported = 0
@@ -87,8 +113,23 @@ def scan_drop_zone(conn: sqlite3.Connection, drop_zone: Path) -> dict:
             "SELECT id FROM items WHERE folder_name = ?", (folder.name,)
         ).fetchone()
         if exists:
-            skipped += 1
-            details.append({"folder": folder.name, "status": "skipped", "reason": "already imported"})
+            inserted_photos = import_folder_photos(conn, int(exists["id"]), folder)
+            if inserted_photos:
+                imported += 1
+                conn.execute(
+                    "UPDATE items SET folder_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (str(folder), int(exists["id"])),
+                )
+                details.append(
+                    {
+                        "folder": folder.name,
+                        "status": "updated",
+                        "reason": f"added {inserted_photos} new photo record(s)",
+                    }
+                )
+            else:
+                skipped += 1
+                details.append({"folder": folder.name, "status": "skipped", "reason": "already imported; no new photos"})
             continue
 
         parsed = parse_gist(gist)
@@ -139,13 +180,9 @@ def scan_drop_zone(conn: sqlite3.Connection, drop_zone: Path) -> dict:
             fields,
         )
         item_id = cursor.lastrowid
-        for index, photo in enumerate(sorted(p for p in folder.iterdir() if p.suffix.lower() in PHOTO_EXTENSIONS)):
-            conn.execute(
-                "INSERT INTO photos (item_id, path, filename, sort_order) VALUES (?, ?, ?, ?)",
-                (item_id, str(photo), photo.name, index),
-            )
+        inserted_photos = import_folder_photos(conn, int(item_id), folder)
         imported += 1
-        details.append({"folder": folder.name, "status": "imported", "reason": f"used {gist.name}"})
+        details.append({"folder": folder.name, "status": "imported", "reason": f"used {gist.name}; added {inserted_photos} photo record(s)"})
 
     conn.commit()
     return {"imported": imported, "skipped": skipped, "details": details}

@@ -103,6 +103,7 @@ def app_config() -> dict:
     db_path = Path(env.get("DATABASE_PATH", "data/ebay_engine.db"))
     if not db_path.is_absolute():
         db_path = BASE_DIR / db_path
+    ebay_env = (env.get("EBAY_ENV") or "production").strip().lower()
     return {
         "base_dir": BASE_DIR,
         "drop_zone": drop_zone,
@@ -110,4 +111,19 @@ def app_config() -> dict:
         "host": env.get("HOST", "127.0.0.1"),
         "port": int(env.get("PORT", "8787")),
         "settings": load_settings(),
+        "ebay": {
+            "env": "sandbox" if ebay_env == "sandbox" else "production",
+            "marketplace_id": env.get("EBAY_MARKETPLACE_ID", "EBAY_US"),
+            "client_id": env.get("EBAY_CLIENT_ID", ""),
+            "client_secret": env.get("EBAY_CLIENT_SECRET", ""),
+            "redirect_uri": env.get("EBAY_REDIRECT_URI", ""),
+            "user_access_token": env.get("EBAY_USER_ACCESS_TOKEN", ""),
+            "refresh_token": env.get("EBAY_REFRESH_TOKEN", ""),
+            "payment_policy_id": env.get("EBAY_PAYMENT_POLICY_ID", ""),
+            "return_policy_id": env.get("EBAY_RETURN_POLICY_ID", ""),
+            "fulfillment_policy_id": env.get("EBAY_FULFILLMENT_POLICY_ID", ""),
+            "merchant_location_key": env.get("EBAY_MERCHANT_LOCATION_KEY", ""),
+            "default_category_id": env.get("EBAY_DEFAULT_CATEGORY_ID", ""),
+            "public_image_base_url": env.get("EBAY_PUBLIC_IMAGE_BASE_URL", ""),
+        },
     }

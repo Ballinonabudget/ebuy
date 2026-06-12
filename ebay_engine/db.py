@@ -43,6 +43,19 @@ CREATE TABLE IF NOT EXISTS photos (
   FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS photo_publications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  photo_id INTEGER NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'ebay_media',
+  ebay_env TEXT NOT NULL DEFAULT 'sandbox',
+  public_url TEXT NOT NULL DEFAULT '',
+  use_by_date TEXT,
+  uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  error TEXT,
+  UNIQUE(photo_id, provider, ebay_env),
+  FOREIGN KEY(photo_id) REFERENCES photos(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS market_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL,
@@ -143,6 +156,14 @@ MIGRATIONS = {
     },
     "photos": {
         "sort_order": "INTEGER DEFAULT 0",
+    },
+    "photo_publications": {
+        "provider": "TEXT NOT NULL DEFAULT 'ebay_media'",
+        "ebay_env": "TEXT NOT NULL DEFAULT 'sandbox'",
+        "public_url": "TEXT NOT NULL DEFAULT ''",
+        "use_by_date": "TEXT",
+        "uploaded_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "error": "TEXT",
     },
     "market_snapshots": {
         "median_sold_price": "REAL DEFAULT 0",

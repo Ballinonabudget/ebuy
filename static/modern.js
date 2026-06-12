@@ -24,6 +24,7 @@ const CATEGORY_COLOR = {
 const state = {
   items: [],
   counts: {},
+  ebayStatus: null,
   activeQueue: "inbox",
   statusFilter: "all",
   sortBy: "roi",
@@ -69,6 +70,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("`", "&#096;");
 }
 
 function money(value) {
@@ -296,6 +301,8 @@ function renderShell() {
           <div class="mono" style="font-size:10px;color:var(--ink-3);line-height:1.6">
             eBay engine · <span style="color:var(--moss)">ok</span><br>
             local API · <span style="color:var(--moss)">ok</span><br>
+            Browse API · <span id="ebay-browse-status" style="color:var(--ink-3)">checking</span><br>
+            Listing API · <span id="ebay-listing-status" style="color:var(--ink-3)">checking</span><br>
             <a href="/" style="color:var(--ink-2);text-decoration:none">legacy dashboard</a>
           </div>
         </div>
@@ -355,6 +362,7 @@ function renderShell() {
     render();
   });
   $("#approve-ready").addEventListener("click", approveReady);
+  renderEbayStatus();
 }
 
 function render() {
@@ -459,6 +467,30 @@ async function loadItems() {
   state.watcher.lastSeen = state.items.length;
   if (data.dropZone) $("#watcher-path").textContent = data.dropZone.replace(/^\/Users\/[^/]+/, "~");
   render();
+}
+
+async function loadEbayStatus() {
+  try {
+    const response = await fetch("/api/ebay/status");
+    if (!response.ok) throw new Error("Failed to load eBay status");
+    const data = await response.json();
+    state.ebayStatus = data.ebay;
+    renderEbayStatus();
+  } catch (error) {
+    state.ebayStatus = { browseReady: false, listingReady: false, error: error.message };
+    renderEbayStatus();
+  }
+}
+
+function renderEbayStatus() {
+  const browse = $("#ebay-browse-status");
+  const listing = $("#ebay-listing-status");
+  if (!browse || !listing) return;
+  const status = state.ebayStatus || {};
+  browse.textContent = status.browseReady ? "ready" : "needs keys";
+  browse.style.color = status.browseReady ? "var(--moss)" : "var(--amber)";
+  listing.textContent = status.listingReady ? "ready" : "dry run";
+  listing.style.color = status.listingReady ? "var(--moss)" : "var(--amber)";
 }
 
 function replaceItemsFromApi(data) {
@@ -585,7 +617,14 @@ async function postJson(url, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error("Save failed");
+  if (!response.ok) {
+    let message = "Save failed";
+    try {
+      const data = await response.json();
+      message = data.error || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
   return response.json();
 }
 
@@ -612,6 +651,8 @@ function updateSummary(item) {
       color: item.color,
       conf: item.conf,
       photos: item.photos,
+      existingPhotos: item.existingPhotos,
+      missingPhotos: item.missingPhotos,
       photoUrls: item.photoUrls,
       defects: item.defects,
       cogs: item.cogs,
@@ -671,6 +712,7 @@ function overlayHtml(item, index, total) {
             </div>
             <div class="ai-log">
               <div class="ai-log-title">CV Agent · ${Math.round((item.conf || 0) * 100)}% conf</div>
+              ${Number(item.missingPhotos || 0) ? `<div class="photo-warning">${escapeHtml(item.missingPhotos)} saved photo file(s) are missing from the original folder path.</div>` : ""}
               <ul>${(item.ai?.agentLog || []).map((entry) => `<li>${escapeHtml(entry.line)}</li>`).join("")}</ul>
             </div>
             <div class="attr-grid">
@@ -695,7 +737,7 @@ function overlayHtml(item, index, total) {
             <div>
               <div class="section-h">
                 <div><span class="section-num">01</span><span class="section-title">Market research</span></div>
-                <span class="hint">eBay finding API · ${escapeHtml(item.market?.fetchedAt || "not fetched")}</span>
+                <span class="hint">eBay research · ${escapeHtml(item.market?.fetchedAt || "not fetched")}</span>
               </div>
               <div class="stat-grid">
                 <div class="stat"><div class="l">30d Sold Median</div><div class="v ${tone === "good" ? "tone-good" : tone === "bad" ? "tone-bad" : "tone-warn"}">${money(sold.median || item.ask)}</div><div class="d ${tone === "bad" ? "dn" : "up"}">range ${money(sold.rangeLow)}–${money(sold.rangeHigh)}</div></div>
@@ -732,7 +774,7 @@ function overlayHtml(item, index, total) {
               <div class="section-h"><div><span class="section-num">02</span><span class="section-title">Listing draft</span></div><span class="hint">auto-drafted · editable</span></div>
               <form id="draft-form" style="display:flex;flex-direction:column;gap:14px">
                 <div class="draft-field"><div class="lbl"><span>SEO Title · ${(item.draft?.seoTitle || "").length}/80</span><span class="hint">save</span></div><input class="draft-input" name="title" maxlength="80" value="${escapeHtml(item.draft?.seoTitle || "")}"></div>
-                <div class="draft-field"><div class="lbl"><span>HTML Description</span><span class="hint">preview · edit</span></div><textarea class="draft-textarea" name="description">${escapeHtml(item.draft?.htmlDescription || "")}</textarea></div>
+                <div class="draft-field"><div class="lbl"><span>HTML Description</span><span class="hint"><button type="button" class="text-action" data-preview-listing>preview</button> · edit</span></div><textarea class="draft-textarea" name="description">${escapeHtml(item.draft?.htmlDescription || "")}</textarea></div>
                 <div class="field-row">
                   <div class="draft-field"><div class="lbl"><span>Category</span></div><input class="draft-input" name="category" value="${escapeHtml(item.draft?.category || item.cat)}"></div>
                   <div class="draft-field"><div class="lbl"><span>Shipping</span></div><input class="draft-input" name="shipping_service" value="${escapeHtml(item.draft?.shipping?.service || "calculated_buyer_paid")}"></div>
@@ -755,8 +797,11 @@ function overlayHtml(item, index, total) {
             <button class="btn danger sm" data-status="archived">Reject<span class="kbd">X</span></button>
             <button class="btn sm" data-status="needs_info">Need pix</button>
             <button class="btn sm" data-research>More research</button>
+            <button class="btn sm" data-preview-listing>Preview listing</button>
+            <button class="btn sm" data-upload-ebay-photos>Upload photos</button>
+            <button class="btn sm" data-publish-dry-run>eBay dry run</button>
             <button class="btn sm" data-save-draft>Save draft</button>
-            <button class="btn primary" data-status="listed" ${isReady ? "" : "disabled style=\"opacity:.45;cursor:not-allowed\""}>Approve & list <span class="kbd">A</span></button>
+            <button class="btn primary" data-status="listed" ${isReady ? "" : "disabled style=\"opacity:.45;cursor:not-allowed\""}>Mark listed <span class="kbd">A</span></button>
           </div>
         </div>
       </div>
@@ -787,6 +832,9 @@ function wireOverlay(item) {
   $(".overlay [data-prev]")?.addEventListener("click", () => navOverlay(-1));
   $(".overlay [data-save-draft]")?.addEventListener("click", () => saveDraft(item.id));
   $(".overlay [data-research]")?.addEventListener("click", () => runResearch(item.id));
+  $$(".overlay [data-preview-listing]").forEach((button) => button.addEventListener("click", () => openListingPreview(item)));
+  $(".overlay [data-upload-ebay-photos]")?.addEventListener("click", () => uploadEbayPhotos(item));
+  $(".overlay [data-publish-dry-run]")?.addEventListener("click", () => runPublishDryRun(item));
   $(".overlay [data-open-photo]")?.addEventListener("click", () => openLightbox(item));
   $("#carousel-hero")?.addEventListener("click", () => openLightbox(item));
   $(".overlay [data-set-cover]")?.addEventListener("click", () => setCurrentCover(item));
@@ -807,15 +855,289 @@ function wireOverlay(item) {
   }));
 }
 
-async function saveDraft(id) {
+function draftBodyFromForm() {
   const form = $("#draft-form");
   const body = Object.fromEntries(new FormData(form).entries());
   body.format_kind = "fixed";
+  return body;
+}
+
+async function saveDraft(id, options = {}) {
+  const body = draftBodyFromForm();
   const data = await postJson(`/api/items/${id}/draft`, body);
   updateSummary(data.item);
   render();
-  toast("Draft saved", "amber");
-  await refreshOpenOverlay(id);
+  if (options.toast !== false) toast("Draft saved", "amber");
+  if (options.refresh !== false) await refreshOpenOverlay(id);
+  return data.item;
+}
+
+function currentDraftPreview(item) {
+  const body = $("#draft-form") ? draftBodyFromForm() : {};
+  return {
+    title: body.title || item.draft?.seoTitle || item.model || "",
+    description: body.description || item.draft?.htmlDescription || "",
+    category: body.category || item.draft?.category || item.cat || "",
+    shipping: body.shipping_service || item.draft?.shipping?.service || "calculated_buyer_paid",
+    startPrice: body.start_price || item.draft?.format?.startPrice || item.ask || "",
+  };
+}
+
+function sanitizeListingHtml(value) {
+  return String(value || "")
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "");
+}
+
+function openListingPreview(item) {
+  $(".listing-preview")?.remove();
+  const draft = currentDraftPreview(item);
+  const gallery = (item.photoUrls || []).slice(0, 8).map((url) => `<img src="${escapeAttr(url)}" alt="${escapeAttr(draft.title)} photo">`).join("");
+  const srcdoc = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <base href="${escapeAttr(window.location.origin)}/">
+        <style>
+          body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;color:#111827;background:#fff}
+          .wrap{max-width:980px;margin:0 auto;padding:24px}
+          .grid{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:28px}
+          .hero{aspect-ratio:1/1;background:#f3f4f6;border:1px solid #e5e7eb;display:flex;align-items:center;justify-content:center;overflow:hidden}
+          .hero img{width:100%;height:100%;object-fit:cover}
+          .thumbs{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+          .thumbs img{width:100%;aspect-ratio:1/1;object-fit:cover;border:1px solid #e5e7eb}
+          h1{font-size:22px;line-height:1.25;margin:0 0 12px}
+          .price{font-size:28px;font-weight:700;margin:0 0 18px}
+          .meta{border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:12px 0;margin-bottom:18px;color:#4b5563;font-size:13px}
+          article{font-size:14px;line-height:1.55;color:#1f2937}
+          @media(max-width:760px){.grid{grid-template-columns:1fr}.wrap{padding:14px}}
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <div class="grid">
+            <div>
+              <div class="hero">${item.photoUrls?.[0] ? `<img src="${escapeAttr(item.photoUrls[0])}" alt="${escapeAttr(draft.title)}">` : "No photo"}</div>
+              <div class="thumbs">${gallery}</div>
+            </div>
+            <div>
+              <h1>${escapeHtml(draft.title)}</h1>
+              <div class="price">${money(draft.startPrice)}</div>
+              <div class="meta">Condition: ${escapeHtml(item.condition)}<br>Shipping: ${escapeHtml(draft.shipping)}<br>Category: ${escapeHtml(draft.category)}</div>
+              <article>${sanitizeListingHtml(draft.description)}</article>
+            </div>
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="overlay listing-preview" role="dialog" aria-modal="true">
+      <div class="modal-card preview-card">
+        <div class="modal-head">
+          <div>
+            <div class="crumb"><span>LISTING PREVIEW</span><span>·</span><span>local render</span></div>
+            <h2>${escapeHtml(draft.title || "Untitled listing")}</h2>
+          </div>
+          <button class="btn ghost icon" data-modal-close title="Close">✕</button>
+        </div>
+        <iframe class="preview-frame" sandbox="" srcdoc="${escapeAttr(srcdoc)}"></iframe>
+      </div>
+    </div>
+  `);
+  const modal = $(".listing-preview");
+  const close = () => modal?.remove();
+  modal.addEventListener("click", (event) => {
+    if (event.target.classList.contains("listing-preview")) close();
+  });
+  $("[data-modal-close]", modal)?.addEventListener("click", close);
+}
+
+async function runPublishDryRun(item) {
+  const button = $(".overlay [data-publish-dry-run]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Checking eBay...";
+  }
+  try {
+    const data = await postJson(`/api/items/${item.id}/publish`, $("#draft-form") ? draftBodyFromForm() : {});
+    openPublishModal(data.publish);
+    await loadEbayStatus();
+  } catch (error) {
+    toast(`eBay dry run failed · ${error.message}`, "teal");
+  } finally {
+    const fresh = $(".overlay [data-publish-dry-run]");
+    if (fresh) {
+      fresh.disabled = false;
+      fresh.textContent = "eBay dry run";
+    }
+  }
+}
+
+async function uploadEbayPhotos(item) {
+  const button = $(".overlay [data-upload-ebay-photos]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Uploading...";
+  }
+  try {
+    const data = await postJson(`/api/items/${item.id}/upload-photos`, $("#draft-form") ? draftBodyFromForm() : {});
+    updateSummary(data.item);
+    state.fullItems.set(String(item.id), data.item);
+    await loadItems();
+    const upload = data.upload || {};
+    const message = `eBay photos · ${upload.uploaded || 0} uploaded, ${upload.skipped || 0} already ready, ${upload.failed || 0} failed`;
+    toast(message, upload.failed ? "teal" : "amber");
+    await refreshOpenOverlay(item.id);
+    if (data.publish) openPublishModal(data.publish);
+  } catch (error) {
+    toast(`Photo upload failed · ${error.message}`, "teal");
+  } finally {
+    const fresh = $(".overlay [data-upload-ebay-photos]");
+    if (fresh) {
+      fresh.disabled = false;
+      fresh.textContent = "Upload photos";
+    }
+  }
+}
+
+function blockerKey(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (normalized.includes("oauth") || normalized.includes("refresh")) return "oauth";
+  if (normalized.includes("category")) return "category";
+  if (normalized.includes("image")) return "image";
+  if (normalized.includes("location")) return "location";
+  if (normalized.includes("fulfillment")) return "fulfillment";
+  if (normalized.includes("payment")) return "payment";
+  if (normalized.includes("return")) return "return";
+  return "generic";
+}
+
+function blockerDetail(label) {
+  const details = {
+    oauth: {
+      title: "Seller OAuth token",
+      body: "This unlocks seller actions. App keys prove Ebuy is your app; a seller OAuth refresh token proves your eBay seller account gave the app permission to create inventory and offers.",
+      fields: "Needed in .env: EBAY_REFRESH_TOKEN or EBAY_USER_ACCESS_TOKEN.",
+      action: "Next: create the RuName/redirect URI in eBay Developer, then run the consent flow to generate a refresh token.",
+    },
+    category: {
+      title: "Numeric eBay category ID",
+      body: "The draft currently has a human category like electronics or Tech. eBay Inventory API needs a numeric category ID before it can create an offer.",
+      fields: "Needed in .env: EBAY_DEFAULT_CATEGORY_ID, or type a numeric category into the draft Category field.",
+      action: "Next: use a known eBay category ID for this item type, then rerun dry run.",
+    },
+    image: {
+      title: "eBay-hosted image URL",
+      body: "The app can show local photos with /photo?id=..., but eBay cannot fetch images from your private local server. Use Upload photos to send local item photos to eBay's Commerce Media API.",
+      fields: "Needed: at least one successful eBay Media API upload for this item and environment.",
+      action: "Next: click Upload photos, then rerun eBay dry run.",
+    },
+    location: {
+      title: "Merchant location key",
+      body: "eBay needs an inventory location to know where this item ships from. This is configured on the seller account side.",
+      fields: "Needed in .env: EBAY_MERCHANT_LOCATION_KEY.",
+      action: "Next: create or fetch your seller inventory location key after seller OAuth is working.",
+    },
+    fulfillment: {
+      title: "Fulfillment policy ID",
+      body: "This identifies your shipping policy: handling time, shipping services, domestic/international rules, and buyer-paid shipping settings.",
+      fields: "Needed in .env: EBAY_FULFILLMENT_POLICY_ID.",
+      action: "Next: fetch your eBay business policies after seller OAuth is working.",
+    },
+    payment: {
+      title: "Payment policy ID",
+      body: "This identifies the seller account payment policy that applies to the listing.",
+      fields: "Needed in .env: EBAY_PAYMENT_POLICY_ID.",
+      action: "Next: fetch your eBay business policies after seller OAuth is working.",
+    },
+    return: {
+      title: "Return policy ID",
+      body: "This identifies your returns policy: return window, buyer/seller paid returns, and return acceptance.",
+      fields: "Needed in .env: EBAY_RETURN_POLICY_ID.",
+      action: "Next: fetch your eBay business policies after seller OAuth is working.",
+    },
+    generic: {
+      title: "Publish blocker",
+      body: "This value is required by eBay before a live listing can be created.",
+      fields: `Missing value: ${label}`,
+      action: "Next: add the value, save, then rerun eBay dry run.",
+    },
+  };
+  return details[blockerKey(label)];
+}
+
+function blockerDetailHtml(label) {
+  const detail = blockerDetail(label);
+  return `
+    <div class="blocker-title">${escapeHtml(detail.title)}</div>
+    <p>${escapeHtml(detail.body)}</p>
+    <div class="blocker-field">${escapeHtml(detail.fields)}</div>
+    <div class="blocker-action">${escapeHtml(detail.action)}</div>
+  `;
+}
+
+function openPublishModal(plan) {
+  $(".publish-modal")?.remove();
+  const missing = plan?.missing || [];
+  const firstMissing = missing[0] || "";
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="overlay publish-modal" role="dialog" aria-modal="true">
+      <div class="modal-card publish-card">
+        <div class="modal-head">
+          <div>
+            <div class="crumb"><span>EBAY API</span><span>·</span><span>${escapeHtml(plan?.mode || "dry_run")}</span></div>
+            <h2>${missing.length ? "Not ready to publish" : "Ready for live publish"}</h2>
+          </div>
+          <button class="btn ghost icon" data-modal-close title="Close">✕</button>
+        </div>
+        <div class="publish-body">
+          <div class="publish-summary ${missing.length ? "warn" : "good"}">
+            <div class="mono">SKU</div>
+            <strong>${escapeHtml(plan?.sku || "—")}</strong>
+            <p>${missing.length ? "Fix these fields before a live eBay listing can be created." : "All required local publish fields are present. Live publish still requires explicit confirm_live=true."}</p>
+          </div>
+          <div class="missing-grid">
+            ${missing.length ? missing.map((item, index) => `<button type="button" class="missing-chip ${index === 0 ? "active" : ""}" data-blocker="${escapeAttr(item)}">${escapeHtml(item)}</button>`).join("") : `<span class="missing-chip good">No blocking missing fields</span>`}
+          </div>
+          ${missing.length ? `<div class="blocker-detail" id="blocker-detail">${blockerDetailHtml(firstMissing)}</div>` : ""}
+          <div class="payload-grid">
+            <div>
+              <div class="section-label">Inventory item endpoint</div>
+              <pre>${escapeHtml(plan?.endpoints?.inventoryItem || "")}</pre>
+            </div>
+            <div>
+              <div class="section-label">Offer endpoint</div>
+              <pre>${escapeHtml(plan?.endpoints?.createOffer || "")}</pre>
+            </div>
+          </div>
+          <div class="payload-grid">
+            <div>
+              <div class="section-label">Inventory payload</div>
+              <pre>${escapeHtml(JSON.stringify(plan?.inventoryItemPayload || {}, null, 2))}</pre>
+            </div>
+            <div>
+              <div class="section-label">Offer payload</div>
+              <pre>${escapeHtml(JSON.stringify(plan?.offerPayload || {}, null, 2))}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+  const modal = $(".publish-modal");
+  const close = () => modal?.remove();
+  modal.addEventListener("click", (event) => {
+    if (event.target.classList.contains("publish-modal")) close();
+  });
+  $("[data-modal-close]", modal)?.addEventListener("click", close);
+  $$(".publish-modal [data-blocker]").forEach((chip) => chip.addEventListener("click", () => {
+    $$(".publish-modal [data-blocker]").forEach((node) => node.classList.remove("active"));
+    chip.classList.add("active");
+    $("#blocker-detail").innerHTML = blockerDetailHtml(chip.dataset.blocker);
+  }));
 }
 
 function activePhotoIndex() {
@@ -948,6 +1270,11 @@ document.addEventListener("keydown", (event) => {
     $(".lightbox")?.remove();
     return;
   }
+  if (event.key === "Escape" && ($(".listing-preview") || $(".publish-modal"))) {
+    $(".listing-preview")?.remove();
+    $(".publish-modal")?.remove();
+    return;
+  }
   if (event.key === "Escape" && state.openId) closeOverlay();
   if ((event.key === "j" || event.key === "ArrowDown") && state.openId) navOverlay(1);
   if ((event.key === "k" || event.key === "ArrowUp") && state.openId) navOverlay(-1);
@@ -962,6 +1289,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 renderShell();
+loadEbayStatus().catch(() => {});
 loadItems().catch((error) => {
   $("#item-rows").innerHTML = `<tr><td colspan="12" style="padding:40px"><div class="empty">${escapeHtml(error.message)}</div></td></tr>`;
 });
