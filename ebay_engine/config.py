@@ -7,6 +7,21 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+EBAY_PROFILE_FIELDS = {
+    "CLIENT_ID": "client_id",
+    "CLIENT_SECRET": "client_secret",
+    "REDIRECT_URI": "redirect_uri",
+    "USER_ACCESS_TOKEN": "user_access_token",
+    "REFRESH_TOKEN": "refresh_token",
+    "PAYMENT_POLICY_ID": "payment_policy_id",
+    "RETURN_POLICY_ID": "return_policy_id",
+    "FULFILLMENT_POLICY_ID": "fulfillment_policy_id",
+    "MERCHANT_LOCATION_KEY": "merchant_location_key",
+    "DEFAULT_CATEGORY_ID": "default_category_id",
+    "PUBLIC_IMAGE_BASE_URL": "public_image_base_url",
+}
+
+
 def _coerce(value: str):
     raw = value.strip()
     if raw.lower() in {"true", "false"}:
@@ -42,6 +57,28 @@ def load_env(path: Path | None = None) -> dict[str, str]:
             key, value = stripped.split("=", 1)
             values[key.strip()] = value.strip().strip("\"'")
     return values
+
+
+def save_env_values(updates: dict[str, str], path: Path | None = None) -> None:
+    env_path = path or BASE_DIR / ".env"
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    seen = set()
+    output = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            output.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            output.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            output.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={value}")
+    env_path.write_text("\n".join(output) + "\n")
 
 
 def load_settings(path: Path | None = None) -> dict:
@@ -104,6 +141,8 @@ def app_config() -> dict:
     if not db_path.is_absolute():
         db_path = BASE_DIR / db_path
     ebay_env = (env.get("EBAY_ENV") or "production").strip().lower()
+    ebay_env = "sandbox" if ebay_env == "sandbox" else "production"
+    ebay = ebay_profile_config(env, ebay_env)
     return {
         "base_dir": BASE_DIR,
         "drop_zone": drop_zone,
@@ -111,19 +150,46 @@ def app_config() -> dict:
         "host": env.get("HOST", "127.0.0.1"),
         "port": int(env.get("PORT", "8787")),
         "settings": load_settings(),
-        "ebay": {
-            "env": "sandbox" if ebay_env == "sandbox" else "production",
-            "marketplace_id": env.get("EBAY_MARKETPLACE_ID", "EBAY_US"),
-            "client_id": env.get("EBAY_CLIENT_ID", ""),
-            "client_secret": env.get("EBAY_CLIENT_SECRET", ""),
-            "redirect_uri": env.get("EBAY_REDIRECT_URI", ""),
-            "user_access_token": env.get("EBAY_USER_ACCESS_TOKEN", ""),
-            "refresh_token": env.get("EBAY_REFRESH_TOKEN", ""),
-            "payment_policy_id": env.get("EBAY_PAYMENT_POLICY_ID", ""),
-            "return_policy_id": env.get("EBAY_RETURN_POLICY_ID", ""),
-            "fulfillment_policy_id": env.get("EBAY_FULFILLMENT_POLICY_ID", ""),
-            "merchant_location_key": env.get("EBAY_MERCHANT_LOCATION_KEY", ""),
-            "default_category_id": env.get("EBAY_DEFAULT_CATEGORY_ID", ""),
-            "public_image_base_url": env.get("EBAY_PUBLIC_IMAGE_BASE_URL", ""),
-        },
+        "ebay": ebay,
     }
+
+
+def ebay_profile_config(env: dict[str, str], active_env: str) -> dict:
+    prefix = "EBAY_SANDBOX" if active_env == "sandbox" else "EBAY_PRODUCTION"
+    profile = {
+        "env": active_env,
+        "marketplace_id": env.get(f"{prefix}_MARKETPLACE_ID") or env.get("EBAY_MARKETPLACE_ID", "EBAY_US"),
+        "allow_production_publish": (env.get("EBAY_ALLOW_PRODUCTION_PUBLISH") or "").strip().lower() == "true",
+    }
+    for suffix, key in EBAY_PROFILE_FIELDS.items():
+        value = env.get(f"{prefix}_{suffix}", "")
+        if active_env == "sandbox" and not value:
+            value = env.get(f"EBAY_{suffix}", "")
+        profile[key] = value
+    profile["profiles"] = {
+        "sandbox": ebay_profile_summary(env, "EBAY_SANDBOX", allow_legacy=True),
+        "production": ebay_profile_summary(env, "EBAY_PRODUCTION", allow_legacy=False),
+    }
+    return profile
+
+
+def ebay_profile_summary(env: dict[str, str], prefix: str, allow_legacy: bool = False) -> dict:
+    def value(suffix: str) -> str:
+        direct = env.get(f"{prefix}_{suffix}", "")
+        if allow_legacy and not direct:
+            return env.get(f"EBAY_{suffix}", "")
+        return direct
+
+    has_app = bool(value("CLIENT_ID") and value("CLIENT_SECRET"))
+    has_seller = bool(value("USER_ACCESS_TOKEN") or value("REFRESH_TOKEN"))
+    has_policies = all(
+        bool(value(suffix))
+        for suffix in [
+            "PAYMENT_POLICY_ID",
+            "RETURN_POLICY_ID",
+            "FULFILLMENT_POLICY_ID",
+            "MERCHANT_LOCATION_KEY",
+            "DEFAULT_CATEGORY_ID",
+        ]
+    )
+    return {"hasAppCredentials": has_app, "hasSellerToken": has_seller, "hasListingSetup": has_policies}

@@ -25,6 +25,7 @@ const state = {
   items: [],
   counts: {},
   ebayStatus: null,
+  dealScout: [],
   activeQueue: "inbox",
   statusFilter: "all",
   sortBy: "roi",
@@ -303,7 +304,12 @@ function renderShell() {
             local API · <span style="color:var(--moss)">ok</span><br>
             Browse API · <span id="ebay-browse-status" style="color:var(--ink-3)">checking</span><br>
             Listing API · <span id="ebay-listing-status" style="color:var(--ink-3)">checking</span><br>
+            Mode · <span id="ebay-env-status" style="color:var(--ink-3)">checking</span><br>
             <a href="/" style="color:var(--ink-2);text-decoration:none">legacy dashboard</a>
+          </div>
+          <div class="mode-toggle" id="ebay-mode-toggle">
+            <button class="mode-btn" data-ebay-mode="sandbox">Sandbox</button>
+            <button class="mode-btn" data-ebay-mode="production">Production</button>
           </div>
         </div>
       </aside>
@@ -316,6 +322,7 @@ function renderShell() {
           <div class="tape" id="tape"></div>
           <div class="topbar-actions">
             <button class="btn ghost sm" id="search-btn" title="Search">⌘K</button>
+            <button class="btn sm" id="deal-scout-btn">Deal Scout</button>
             <button class="btn sm" id="scan-btn">+ Add photos</button>
           </div>
         </div>
@@ -355,6 +362,7 @@ function renderShell() {
     <div class="toasts" id="toasts"></div>
   `;
   $("#scan-btn").addEventListener("click", scanDropZone);
+  $("#deal-scout-btn").addEventListener("click", openDealScout);
   $("#search-btn").addEventListener("click", openCommandPalette);
   $("#sort-select").addEventListener("click", () => {
     const idx = sorts.findIndex(([key]) => key === state.sortBy);
@@ -362,6 +370,7 @@ function renderShell() {
     render();
   });
   $("#approve-ready").addEventListener("click", approveReady);
+  $$("#ebay-mode-toggle [data-ebay-mode]").forEach((button) => button.addEventListener("click", () => setEbayMode(button.dataset.ebayMode)));
   renderEbayStatus();
 }
 
@@ -485,12 +494,34 @@ async function loadEbayStatus() {
 function renderEbayStatus() {
   const browse = $("#ebay-browse-status");
   const listing = $("#ebay-listing-status");
-  if (!browse || !listing) return;
+  const env = $("#ebay-env-status");
+  if (!browse || !listing || !env) return;
   const status = state.ebayStatus || {};
   browse.textContent = status.browseReady ? "ready" : "needs keys";
   browse.style.color = status.browseReady ? "var(--moss)" : "var(--amber)";
   listing.textContent = status.listingReady ? "ready" : "dry run";
   listing.style.color = status.listingReady ? "var(--moss)" : "var(--amber)";
+  env.textContent = status.env || "unknown";
+  env.style.color = status.env === "production" ? "var(--rose)" : "var(--moss)";
+  $$("#ebay-mode-toggle [data-ebay-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.ebayMode === status.env);
+  });
+}
+
+async function setEbayMode(env) {
+  if (!["sandbox", "production"].includes(env)) return;
+  if (env === "production" && !confirm("Switch to Production profile? Production publishing remains blocked unless explicitly enabled in .env.")) {
+    return;
+  }
+  try {
+    const data = await postJson("/api/ebay/mode", { env });
+    state.ebayStatus = data.ebay;
+    renderEbayStatus();
+    state.fullItems.clear();
+    toast(`eBay mode switched to ${env}`, env === "production" ? "teal" : "moss");
+  } catch (error) {
+    toast(`Mode switch failed · ${error.message}`, "teal");
+  }
 }
 
 function replaceItemsFromApi(data) {
@@ -535,6 +566,101 @@ async function approveReady() {
   const data = await postJson("/api/items/bulk-status", { ids, status: "listed" });
   replaceItemsFromApi(data);
   toast(`Listed ${data.updated || 0} ready item(s)`, "moss");
+}
+
+async function openDealScout() {
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="overlay deal-scout-modal" role="dialog" aria-modal="true">
+      <div class="modal-card deal-scout-card">
+        <div class="modal-head">
+          <div>
+            <div class="crumb"><span>DEAL SCOUT</span><span>·</span><span>human approved</span></div>
+            <h2>Buy candidates ranked by ROI</h2>
+          </div>
+          <button class="btn ghost icon" data-modal-close title="Close">✕</button>
+        </div>
+        <div class="deal-scout-body" id="deal-scout-body">
+          <div class="empty">Scanning eBay Browse API against your local sold-comp history...</div>
+        </div>
+      </div>
+    </div>
+  `);
+  const modal = $(".deal-scout-modal");
+  const close = () => modal?.remove();
+  modal.addEventListener("click", (event) => {
+    if (event.target.classList.contains("deal-scout-modal")) close();
+  });
+  $("[data-modal-close]", modal)?.addEventListener("click", close);
+  try {
+    const response = await fetch("/api/deal-scout");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Deal Scout failed");
+    state.dealScout = data.candidates || [];
+    renderDealScout();
+  } catch (error) {
+    $("#deal-scout-body").innerHTML = `<div class="empty">Deal Scout failed<br><span class="mono">${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
+function renderDealScout() {
+  const body = $("#deal-scout-body");
+  if (!body) return;
+  const candidates = state.dealScout || [];
+  if (!candidates.length) {
+    body.innerHTML = `<div class="empty">No deal candidates yet<br><span class="mono">Run market research on more items or add stronger sold-comp data.</span></div>`;
+    return;
+  }
+  body.innerHTML = `
+    <div class="deal-scout-list">
+      ${candidates.map((candidate) => {
+        const tone = candidate.estimatedProfit >= 25 && candidate.roiPct >= 30 ? "good" : candidate.estimatedProfit > 0 ? "warn" : "bad";
+        return `
+          <div class="deal-row ${tone}">
+            <div class="deal-thumb">${candidate.imageUrl ? `<img src="${escapeAttr(candidate.imageUrl)}" alt="${escapeAttr(candidate.title)}">` : ""}</div>
+            <div class="deal-main">
+              <div class="deal-title">${escapeHtml(candidate.title)}</div>
+              <div class="deal-meta">${escapeHtml(candidate.query)} · ${escapeHtml(candidate.condition || "condition unknown")} · seller ${escapeHtml(candidate.seller || "unknown")}</div>
+              <div class="deal-math">
+                <span>Buy ${money(candidate.buyPrice)}</span>
+                <span>Est. sale ${money(candidate.estimatedSale)}</span>
+                <span>Profit ${money(candidate.estimatedProfit)}</span>
+                <span>ROI ${pct(candidate.roiPct)}</span>
+                <span>Sold comps ${candidate.soldCount30d || 0}</span>
+              </div>
+            </div>
+            <div class="deal-actions">
+              <span class="deal-rec ${tone}">${escapeHtml(candidate.recommendation)}</span>
+              <button class="btn sm" data-deal-watch="${escapeAttr(candidate.candidateKey)}">Watch</button>
+              <button class="btn ghost sm" data-deal-pass="${escapeAttr(candidate.candidateKey)}">Pass</button>
+              ${candidate.url ? `<a class="btn sm" href="${escapeAttr(candidate.url)}" target="_blank" rel="noreferrer">Open</a>` : ""}
+              <span class="mono" style="font-size:10px;color:var(--ink-3)">${escapeHtml(candidate.reviewAction || "new")}</span>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+  $$("[data-deal-watch]").forEach((button) => button.addEventListener("click", () => reviewDeal(button.dataset.dealWatch, "watch")));
+  $$("[data-deal-pass]").forEach((button) => button.addEventListener("click", () => reviewDeal(button.dataset.dealPass, "pass")));
+}
+
+async function reviewDeal(key, action) {
+  const candidate = (state.dealScout || []).find((item) => item.candidateKey === key);
+  if (!candidate) return;
+  try {
+    await postJson("/api/deal-scout/review", {
+      candidate_key: key,
+      action,
+      title: candidate.title,
+      url: candidate.url,
+      notes: `${money(candidate.buyPrice)} buy / ${money(candidate.estimatedSale)} estimated sale / ${money(candidate.estimatedProfit)} profit`,
+    });
+    candidate.reviewAction = action;
+    renderDealScout();
+    toast(`Deal marked ${action}`, action === "watch" ? "moss" : "teal");
+  } catch (error) {
+    toast(`Deal review failed · ${error.message}`, "teal");
+  }
 }
 
 async function fetchFullItem(id) {
@@ -670,6 +796,7 @@ function updateSummary(item) {
 function overlayHtml(item, index, total) {
   const roi = roiPct(item);
   const isReady = item.financial?.verdict === "approve" || item.status === "ready";
+  const isListed = item.status === "listed" || item.queue === "listed" || item.engineStatus === "listed";
   const tone = valueTone(item.net, roi);
   const verdict = item.financial?.verdict || (tone === "bad" ? "pass" : tone === "good" ? "approve" : "review");
   const verdictLabel = verdict === "pass" ? "Pass" : verdict === "approve" ? "Approve" : verdict;
@@ -800,6 +927,7 @@ function overlayHtml(item, index, total) {
             <button class="btn sm" data-preview-listing>Preview listing</button>
             <button class="btn sm" data-upload-ebay-photos>Upload photos</button>
             <button class="btn sm" data-publish-dry-run>eBay dry run</button>
+            ${isListed ? `<button class="btn sm" disabled title="This item already has a listing record">Sandbox listing created</button>` : `<button class="btn sm" data-create-sandbox-listing>Create sandbox listing</button>`}
             <button class="btn sm" data-save-draft>Save draft</button>
             <button class="btn primary" data-status="listed" ${isReady ? "" : "disabled style=\"opacity:.45;cursor:not-allowed\""}>Mark listed <span class="kbd">A</span></button>
           </div>
@@ -835,6 +963,7 @@ function wireOverlay(item) {
   $$(".overlay [data-preview-listing]").forEach((button) => button.addEventListener("click", () => openListingPreview(item)));
   $(".overlay [data-upload-ebay-photos]")?.addEventListener("click", () => uploadEbayPhotos(item));
   $(".overlay [data-publish-dry-run]")?.addEventListener("click", () => runPublishDryRun(item));
+  $(".overlay [data-create-sandbox-listing]")?.addEventListener("click", () => createSandboxListing(item));
   $(".overlay [data-open-photo]")?.addEventListener("click", () => openLightbox(item));
   $("#carousel-hero")?.addEventListener("click", () => openLightbox(item));
   $(".overlay [data-set-cover]")?.addEventListener("click", () => setCurrentCover(item));
@@ -963,7 +1092,7 @@ async function runPublishDryRun(item) {
   }
   try {
     const data = await postJson(`/api/items/${item.id}/publish`, $("#draft-form") ? draftBodyFromForm() : {});
-    openPublishModal(data.publish);
+    openPublishModal(data.publish, item);
     await loadEbayStatus();
   } catch (error) {
     toast(`eBay dry run failed · ${error.message}`, "teal");
@@ -991,7 +1120,7 @@ async function uploadEbayPhotos(item) {
     const message = `eBay photos · ${upload.uploaded || 0} uploaded, ${upload.skipped || 0} already ready, ${upload.failed || 0} failed`;
     toast(message, upload.failed ? "teal" : "amber");
     await refreshOpenOverlay(item.id);
-    if (data.publish) openPublishModal(data.publish);
+    if (data.publish) openPublishModal(data.publish, item);
   } catch (error) {
     toast(`Photo upload failed · ${error.message}`, "teal");
   } finally {
@@ -999,6 +1128,37 @@ async function uploadEbayPhotos(item) {
     if (fresh) {
       fresh.disabled = false;
       fresh.textContent = "Upload photos";
+    }
+  }
+}
+
+async function createSandboxListing(item) {
+  if ((state.ebayStatus?.env || "") !== "sandbox") {
+    toast("Switch to Sandbox mode before creating a sandbox listing", "teal");
+    return;
+  }
+  if (!confirm("Create a real Sandbox listing on eBay's sandbox site for this item?")) return;
+  const button = $(".overlay [data-create-sandbox-listing]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Creating...";
+  }
+  try {
+    const body = $("#draft-form") ? draftBodyFromForm() : {};
+    body.confirm_live = true;
+    body.confirm_environment = "sandbox";
+    const data = await postJson(`/api/items/${item.id}/publish`, body);
+    updateSummary(data.item);
+    await loadItems();
+    openPublishModal(data.publish, data.item || item);
+    toast("Sandbox listing created", "moss");
+  } catch (error) {
+    toast(`Sandbox listing failed · ${error.message}`, "teal");
+  } finally {
+    const fresh = $(".overlay [data-create-sandbox-listing]");
+    if (fresh) {
+      fresh.disabled = false;
+      fresh.textContent = "Create sandbox listing";
     }
   }
 }
@@ -1079,10 +1239,33 @@ function blockerDetailHtml(label) {
   `;
 }
 
-function openPublishModal(plan) {
+function validationHtml(plan) {
+  const checks = plan?.validation || [];
+  if (!checks.length) return "";
+  return `
+    <div class="validation-panel">
+      <div class="section-label">Listing validation</div>
+      <div class="validation-grid">
+        ${checks.map((check) => `
+          <div class="validation-row ${check.level}">
+            <span>${check.pass ? "✓" : check.level === "warning" ? "!" : "×"}</span>
+            <div>
+              <strong>${escapeHtml(check.label)}</strong>
+              <p>${escapeHtml(check.detail)}</p>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function openPublishModal(plan, item = null) {
   $(".publish-modal")?.remove();
   const missing = plan?.missing || [];
   const firstMissing = missing[0] || "";
+  const isListed = item && (item.status === "listed" || item.queue === "listed" || item.engineStatus === "listed");
+  const canCreateSandbox = item && !isListed && plan?.canPublish && plan?.environment === "sandbox";
   document.body.insertAdjacentHTML("beforeend", `
     <div class="overlay publish-modal" role="dialog" aria-modal="true">
       <div class="modal-card publish-card">
@@ -1103,6 +1286,8 @@ function openPublishModal(plan) {
             ${missing.length ? missing.map((item, index) => `<button type="button" class="missing-chip ${index === 0 ? "active" : ""}" data-blocker="${escapeAttr(item)}">${escapeHtml(item)}</button>`).join("") : `<span class="missing-chip good">No blocking missing fields</span>`}
           </div>
           ${missing.length ? `<div class="blocker-detail" id="blocker-detail">${blockerDetailHtml(firstMissing)}</div>` : ""}
+          ${validationHtml(plan)}
+          ${canCreateSandbox ? `<button class="btn primary sm" data-modal-create-sandbox>Create sandbox listing</button>` : ""}
           <div class="payload-grid">
             <div>
               <div class="section-label">Inventory item endpoint</div>
@@ -1138,6 +1323,7 @@ function openPublishModal(plan) {
     chip.classList.add("active");
     $("#blocker-detail").innerHTML = blockerDetailHtml(chip.dataset.blocker);
   }));
+  $("[data-modal-create-sandbox]", modal)?.addEventListener("click", () => createSandboxListing(item));
 }
 
 function activePhotoIndex() {

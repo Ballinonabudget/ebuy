@@ -56,6 +56,32 @@ CREATE TABLE IF NOT EXISTS photo_publications (
   FOREIGN KEY(photo_id) REFERENCES photos(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS ebay_listing_publications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL,
+  ebay_env TEXT NOT NULL,
+  sku TEXT NOT NULL,
+  offer_id TEXT,
+  listing_id TEXT,
+  status TEXT NOT NULL DEFAULT 'published',
+  response_json TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(item_id, ebay_env),
+  FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS deal_scout_reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_key TEXT NOT NULL UNIQUE,
+  action TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS market_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL,
@@ -164,6 +190,17 @@ MIGRATIONS = {
         "use_by_date": "TEXT",
         "uploaded_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "error": "TEXT",
+    },
+    "ebay_listing_publications": {
+        "offer_id": "TEXT",
+        "listing_id": "TEXT",
+        "status": "TEXT NOT NULL DEFAULT 'published'",
+        "response_json": "TEXT",
+        "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    },
+    "deal_scout_reviews": {
+        "notes": "TEXT",
+        "updated_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
     },
     "market_snapshots": {
         "median_sold_price": "REAL DEFAULT 0",

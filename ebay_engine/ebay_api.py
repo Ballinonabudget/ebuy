@@ -25,6 +25,19 @@ SELL_SCOPES = [
 SELL_SCOPE = " ".join(SELL_SCOPES)
 _TOKEN_CACHE: dict[str, dict] = {}
 
+CATEGORY_HINTS = {
+    "tech": "29946",
+    "electronics": "29946",
+    "sneakers": "15709",
+    "shoes": "15709",
+    "apparel": "15687",
+    "clothing": "15687",
+    "bags": "169291",
+    "accessories": "4250",
+    "games": "139973",
+    "toys": "220",
+}
+
 
 class EbayConfigError(RuntimeError):
     pass
@@ -146,7 +159,10 @@ def readiness(config: dict) -> dict:
         "tokenEndpoint": token_url(config),
         "browseEndpoint": f"{api_root(config)}/buy/browse/v1/item_summary/search",
         "inventoryEndpoint": f"{api_root(config)}/sell/inventory/v1",
+        "mediaEndpoint": f"{media_root(config)}/commerce/media/v1_beta/image/create_image_from_file",
         "consentUrl": consent_url(config),
+        "profiles": config.get("profiles", {}),
+        "allowProductionPublish": bool(config.get("allow_production_publish")),
     }
 
 
@@ -172,8 +188,23 @@ def browse_active_listings(item: dict, config: dict, limit: int = 20) -> dict:
     if not readiness(config)["browseReady"]:
         raise EbayConfigError("Browse API needs EBAY_CLIENT_ID and EBAY_CLIENT_SECRET.")
     query = build_query(item)
-    params = urlencode({"q": query, "limit": max(1, min(limit, 50)), "fieldgroups": "EXTENDED"})
-    url = f"{api_root(config)}/buy/browse/v1/item_summary/search?{params}"
+    data = browse_search(query, config, limit=limit)
+    return {
+        "query": query,
+        "searchUrl": data["searchUrl"],
+        "activeCount": data["activeCount"],
+        "listings": data["listings"],
+    }
+
+
+def browse_search(query: str, config: dict, limit: int = 20, filter_value: str = "") -> dict:
+    if not readiness(config)["browseReady"]:
+        raise EbayConfigError("Browse API needs eBay app credentials.")
+    params = {"q": query, "limit": max(1, min(limit, 50)), "fieldgroups": "EXTENDED"}
+    if filter_value:
+        params["filter"] = filter_value
+    encoded = urlencode(params)
+    url = f"{api_root(config)}/buy/browse/v1/item_summary/search?{encoded}"
     request = Request(
         url,
         headers={
@@ -195,10 +226,12 @@ def browse_active_listings(item: dict, config: dict, limit: int = 20) -> dict:
                 "condition": summary.get("condition") or "",
                 "price": _float(price.get("value")),
                 "currency": price.get("currency") or "USD",
+                "shipping": _float(((summary.get("shippingOptions") or [{}])[0].get("shippingCost") or {}).get("value")),
                 "watchers": int(summary.get("watchCount") or summary.get("bidCount") or 0),
                 "url": summary.get("itemWebUrl") or "",
                 "imageUrl": image.get("imageUrl") or "",
                 "seller": seller.get("username") or "",
+                "itemId": summary.get("itemId") or "",
                 "source": "ebay_browse",
             }
         )
@@ -215,7 +248,7 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
     title = (draft.get("title") or item.get("title") or item.get("model") or item.get("folder_name") or "")[:80]
     description = draft.get("description") or ""
     price = _float(draft.get("start_price"))
-    category_id = _category_id(draft, config)
+    category_id = _category_id(item, draft, config)
     image_urls = public_image_urls(photos, config)
     condition = condition_enum(item.get("condition") or "")
     marketplace_id = config.get("marketplace_id") or "EBAY_US"
@@ -223,6 +256,7 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
         "availability": {"shipToLocationAvailability": {"quantity": 1}},
         "condition": condition,
         "conditionDescription": (item.get("condition") or "See photos")[:1000],
+        "packageWeightAndSize": package_weight_and_size(item),
         "product": {
             "title": title,
             "description": text_from_html(description),
@@ -247,6 +281,7 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
         },
         "pricingSummary": {"price": {"currency": "USD", "value": f"{price:.2f}"}},
     }
+    validation = validate_listing(item, draft, photos, config, inventory_payload, offer_payload)
     missing = []
     if not readiness(config)["hasUserToken"]:
         missing.append("seller OAuth token or refresh token")
@@ -265,11 +300,14 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
     for label, value in offer_payload["listingPolicies"].items():
         if not value:
             missing.append(label)
+    missing.extend(check["field"] for check in validation if check["level"] == "blocker" and check["field"] not in missing)
     return {
         "mode": "dry_run",
+        "environment": config.get("env", "production"),
         "sku": sku,
         "canPublish": not missing,
         "missing": missing,
+        "validation": validation,
         "endpoints": {
             "inventoryItem": f"PUT {api_root(config)}/sell/inventory/v1/inventory_item/{quote(sku)}",
             "createOffer": f"POST {api_root(config)}/sell/inventory/v1/offer",
@@ -309,10 +347,24 @@ def publish_live(item: dict, draft: dict, photos: list[dict], config: dict) -> d
         headers=common_headers,
         method="POST",
     )
-    offer_response = _request_json(offer_request)
+    try:
+        offer_response = _request_json(offer_request)
+    except EbayApiError as exc:
+        offer_id = _offer_id_from_error(str(exc))
+        if not offer_id:
+            raise
+        offer_response = {"offerId": offer_id, "reusedExistingOffer": True}
     offer_id = offer_response.get("offerId")
     if not offer_id:
         raise EbayApiError("createOffer did not return offerId.")
+    if offer_response.get("reusedExistingOffer"):
+        update_offer_request = Request(
+            f"{api_root(config)}/sell/inventory/v1/offer/{quote(str(offer_id))}",
+            data=json.dumps(plan["offerPayload"]).encode(),
+            headers=common_headers,
+            method="PUT",
+        )
+        offer_response["updateResponse"] = _request_json(update_offer_request)
     publish_request = Request(
         f"{api_root(config)}/sell/inventory/v1/offer/{quote(str(offer_id))}/publish",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -321,6 +373,7 @@ def publish_live(item: dict, draft: dict, photos: list[dict], config: dict) -> d
     publish_response = _request_json(publish_request)
     return {
         "mode": "live",
+        "environment": config.get("env", "production"),
         "sku": sku,
         "inventoryResponse": inventory_response,
         "offerResponse": offer_response,
@@ -394,6 +447,49 @@ def upload_media_image_from_file(photo: dict, config: dict) -> dict:
     }
 
 
+def validate_listing(item: dict, draft: dict, photos: list[dict], config: dict, inventory_payload: dict, offer_payload: dict) -> list[dict]:
+    checks = []
+
+    def add(field: str, label: str, passed: bool, level: str, detail: str) -> None:
+        checks.append({"field": field, "label": label, "pass": bool(passed), "level": "ok" if passed else level, "detail": detail})
+
+    title = inventory_payload["product"].get("title") or ""
+    description = offer_payload.get("listingDescription") or ""
+    image_urls = inventory_payload["product"].get("imageUrls") or []
+    aspects = inventory_payload["product"].get("aspects") or {}
+    raw_category = str(draft.get("category") or "").strip()
+    category = str(offer_payload.get("categoryId") or "").strip()
+    item_category = str(item.get("category") or "").strip().lower()
+
+    add("listing title", "Title", bool(title), "blocker", "eBay requires a listing title.")
+    add("title length", "Title length", len(title) <= 80, "blocker", "Inventory API titles must be 80 characters or fewer.")
+    add("HTML description", "Description", bool(description), "blocker", "A buyer-facing listing description is required.")
+    add("start price", "Price", _float((offer_payload.get("pricingSummary") or {}).get("price", {}).get("value")) > 0, "blocker", "Price must be greater than zero.")
+    add("numeric eBay category ID", "Numeric category", category.isdigit(), "blocker", "Use a numeric eBay category ID, not a label like Tech or Apparel.")
+    add("category mapping", "Category source", raw_category.isdigit(), "warning", "Current category came from a fallback map/default. Confirm it before production.")
+    add("public HTTPS image URL", "eBay image URLs", bool(image_urls), "blocker", "Upload item photos through eBay Media API before publishing.")
+    add("brand aspect", "Brand aspect", bool(aspects.get("Brand")), "warning", "Brand improves search and may be required in some categories.")
+    add("model aspect", "Model aspect", bool(aspects.get("Model")), "warning", "Model improves matching and buyer confidence.")
+    if item_category in {"sneakers", "apparel", "clothing"}:
+        add("size aspect", "Size aspect", bool(aspects.get("Size")), "warning", "Size is important for apparel and footwear listings.")
+    haystack = " ".join(str(item.get(key) or "") for key in ["title", "brand", "model", "folder_name", "category"]).lower()
+    if any(token in haystack for token in ["mic", "microphone", "videomic"]):
+        add("form factor aspect", "Form Factor aspect", bool(aspects.get("Form Factor")), "blocker", "Microphone categories require Form Factor.")
+        add("type aspect", "Type aspect", bool(aspects.get("Type")), "warning", "Microphone listings should include Type.")
+    add("condition", "Condition", bool(item.get("condition")), "blocker", "Condition must be set before publishing.")
+    add("merchant location key", "Merchant location", bool(config.get("merchant_location_key")), "blocker", "Seller inventory location is required.")
+    package = inventory_payload.get("packageWeightAndSize") or {}
+    add("package weight", "Package weight", bool((package.get("weight") or {}).get("value")), "blocker", "Calculated shipping requires package weight.")
+    add("package dimensions", "Package dimensions", bool(package.get("dimensions")), "warning", "Package dimensions improve calculated shipping accuracy.")
+    for field, label in [
+        ("fulfillmentPolicyId", "Fulfillment policy"),
+        ("paymentPolicyId", "Payment policy"),
+        ("returnPolicyId", "Return policy"),
+    ]:
+        add(field, label, bool((offer_payload.get("listingPolicies") or {}).get(field)), "blocker", f"{label} is required for Inventory API offers.")
+    return checks
+
+
 def public_image_urls(photos: list[dict], config: dict) -> list[str]:
     ebay_urls = [
         str(photo.get("ebay_public_url") or "")
@@ -415,6 +511,7 @@ def public_image_urls(photos: list[dict], config: dict) -> list[str]:
 
 def product_aspects(item: dict) -> dict:
     aspects = {}
+    haystack = " ".join(str(item.get(key) or "") for key in ["title", "brand", "model", "folder_name", "category"]).lower()
     if item.get("brand"):
         aspects["Brand"] = [str(item["brand"])]
     if item.get("model"):
@@ -423,9 +520,26 @@ def product_aspects(item: dict) -> dict:
         aspects["MPN"] = [str(item["style_code"])]
     if item.get("color"):
         aspects["Color"] = [str(item["color"])]
-    if item.get("size"):
+    if item.get("size") and str(item.get("size")).strip().lower() not in {"n/a", "na", "none"}:
         aspects["Size"] = [str(item["size"])]
+    if any(token in haystack for token in ["mic", "microphone", "videomic"]):
+        aspects.setdefault("Type", ["Microphone"])
+        aspects.setdefault("Form Factor", ["Shotgun Microphone"])
+        aspects.setdefault("Connectivity", ["3.5 mm (1/8 in) TRS"])
     return aspects
+
+
+def package_weight_and_size(item: dict) -> dict:
+    haystack = " ".join(str(item.get(key) or "") for key in ["title", "model", "folder_name", "category"]).lower()
+    if any(token in haystack for token in ["mic", "microphone", "videomic"]):
+        return {
+            "dimensions": {"height": 4, "length": 8, "width": 6, "unit": "INCH"},
+            "weight": {"value": 1, "unit": "POUND"},
+        }
+    return {
+        "dimensions": {"height": 6, "length": 12, "width": 9, "unit": "INCH"},
+        "weight": {"value": 2, "unit": "POUND"},
+    }
 
 
 def sku_for(item: dict) -> str:
@@ -458,10 +572,13 @@ def text_from_html(value: str) -> str:
     return unescape(text).strip()[:4000]
 
 
-def _category_id(draft: dict, config: dict) -> str:
+def _category_id(item: dict, draft: dict, config: dict) -> str:
     raw = str(draft.get("category") or "").strip()
     if raw.isdigit():
         return raw
+    category_hint = CATEGORY_HINTS.get(raw.lower()) or CATEGORY_HINTS.get(str(item.get("category") or "").lower())
+    if category_hint:
+        return category_hint
     fallback = str(config.get("default_category_id") or "").strip()
     return fallback if fallback.isdigit() else ""
 
@@ -471,6 +588,16 @@ def _float(value) -> float:
         return float(str(value or "0").replace("$", "").replace(",", ""))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _offer_id_from_error(message: str) -> str:
+    if "Offer entity already exists" not in message:
+        return ""
+    match = re.search(r'"offerId"\s*,\s*"value"\s*:\s*"([^"]+)"', message)
+    if match:
+        return match.group(1)
+    match = re.search(r"offerId[^0-9]+([0-9]+)", message)
+    return match.group(1) if match else ""
 
 
 def _multipart_escape(value: str) -> str:

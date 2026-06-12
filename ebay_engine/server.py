@@ -3,16 +3,18 @@ from __future__ import annotations
 import html
 import json
 import mimetypes
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import app_config
+from .config import app_config, save_env_values
 from .db import connect, row, rows
 from .ebay_api import (
     EbayApiError,
     EbayConfigError,
     browse_active_listings,
+    browse_search,
     build_publish_plan,
     publish_live,
     readiness as ebay_readiness,
@@ -24,6 +26,12 @@ from .recommend import latest_recommendation
 
 
 CONFIG = app_config()
+
+
+def refresh_config() -> dict:
+    global CONFIG
+    CONFIG = app_config()
+    return CONFIG
 
 
 def render_template(name: str, context: dict) -> str:
@@ -260,6 +268,28 @@ def audit_capabilities() -> list[dict]:
     ]
 
 
+def ebay_status_payload() -> dict:
+    return ebay_readiness(CONFIG["ebay"])
+
+
+def counts_payload(items: list[dict]) -> dict:
+    return {
+        "inbox": len(items),
+        "ready": sum(1 for item in items if item["status"] == "ready"),
+        "draft": sum(1 for item in items if item["status"] == "draft"),
+        "photos": sum(1 for item in items if item["status"] == "photos"),
+        "review": sum(1 for item in items if item["status"] == "review"),
+        "pass": sum(1 for item in items if item["status"] == "pass"),
+        "listed": sum(1 for item in items if item["status"] == "listed"),
+        "potNet": round(sum(dollars(item.get("net")) for item in items if item.get("net") and item["status"] != "pass"), 2),
+    }
+
+
+def candidate_key(source: str, item_id: str, query: str) -> str:
+    base = item_id or f"{source}:{query}"
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", base).strip("-")[:160]
+
+
 def photo_rows(conn, item_id: int) -> list[dict]:
     return rows(
         conn,
@@ -358,6 +388,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_audit()
         if parsed.path == "/api/ebay/status":
             return self.api_ebay_status()
+        if parsed.path == "/api/deal-scout":
+            return self.api_deal_scout()
         if parsed.path.startswith("/api/items/"):
             return self.api_item(parsed.path)
         if parsed.path == "/":
@@ -381,6 +413,10 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode()
         if parsed.path == "/api/scan":
             return self.api_scan()
+        if parsed.path == "/api/ebay/mode":
+            return self.api_ebay_mode(raw)
+        if parsed.path == "/api/deal-scout/review":
+            return self.api_deal_scout_review(raw)
         if parsed.path == "/api/items/bulk-status":
             return self.api_bulk_status(raw)
         if parsed.path.startswith("/api/items/"):
@@ -618,22 +654,63 @@ class Handler(BaseHTTPRequestHandler):
         self.respond_json({"capabilities": audit_capabilities()})
 
     def api_ebay_status(self):
-        self.respond_json({"ebay": ebay_readiness(CONFIG["ebay"])})
+        self.respond_json({"ebay": ebay_status_payload()})
+
+    def api_ebay_mode(self, raw: str):
+        data = self.read_json(raw)
+        target = str(data.get("env") or data.get("mode") or "").lower()
+        if target not in {"sandbox", "production"}:
+            self.respond_json({"error": "Mode must be sandbox or production."}, 400)
+            return
+        save_env_values({"EBAY_ENV": target})
+        refresh_config()
+        self.respond_json({"ebay": ebay_status_payload()})
+
+    def api_deal_scout(self):
+        try:
+            with connect(CONFIG["database_path"]) as conn:
+                candidates = self.deal_scout_candidates(conn)
+        except (EbayConfigError, EbayApiError) as exc:
+            self.respond_json({"error": str(exc), "candidates": []}, 400)
+            return
+        self.respond_json({"candidates": candidates, "ebay": ebay_status_payload()})
+
+    def api_deal_scout_review(self, raw: str):
+        data = self.read_json(raw)
+        key = str(data.get("candidate_key") or "").strip()
+        action = str(data.get("action") or "").strip().lower()
+        if not key or action not in {"watch", "pass"}:
+            self.respond_json({"error": "Deal review needs candidate_key and action watch/pass."}, 400)
+            return
+        with connect(CONFIG["database_path"]) as conn:
+            conn.execute(
+                """
+                INSERT INTO deal_scout_reviews (
+                  candidate_key, action, title, url, notes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(candidate_key) DO UPDATE SET
+                  action = excluded.action,
+                  title = excluded.title,
+                  url = excluded.url,
+                  notes = excluded.notes,
+                  updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    key,
+                    action,
+                    str(data.get("title") or ""),
+                    str(data.get("url") or ""),
+                    str(data.get("notes") or ""),
+                ),
+            )
+            conn.commit()
+        self.respond_json({"candidate_key": key, "action": action})
 
     def api_items(self):
         with connect(CONFIG["database_path"]) as conn:
             db_items = rows(conn, "SELECT * FROM items ORDER BY updated_at DESC, id DESC")
             items = [self.item_payload(conn, item, full=False) for item in db_items]
-        counts = {
-            "inbox": len(items),
-            "ready": sum(1 for item in items if item["status"] == "ready"),
-            "draft": sum(1 for item in items if item["status"] == "draft"),
-            "photos": sum(1 for item in items if item["status"] == "photos"),
-            "review": sum(1 for item in items if item["status"] == "review"),
-            "pass": sum(1 for item in items if item["status"] == "pass"),
-            "listed": sum(1 for item in items if item["status"] == "listed"),
-            "potNet": round(sum(dollars(item.get("net")) for item in items if item.get("net") and item["status"] != "pass"), 2),
-        }
+        counts = counts_payload(items)
         self.respond_json({"items": items, "counts": counts, "dropZone": str(CONFIG["drop_zone"])})
 
     def api_scan(self):
@@ -641,16 +718,7 @@ class Handler(BaseHTTPRequestHandler):
             result = scan_drop_zone(conn, CONFIG["drop_zone"])
             db_items = rows(conn, "SELECT * FROM items ORDER BY updated_at DESC, id DESC")
             items = [self.item_payload(conn, item, full=False) for item in db_items]
-        counts = {
-            "inbox": len(items),
-            "ready": sum(1 for item in items if item["status"] == "ready"),
-            "draft": sum(1 for item in items if item["status"] == "draft"),
-            "photos": sum(1 for item in items if item["status"] == "photos"),
-            "review": sum(1 for item in items if item["status"] == "review"),
-            "pass": sum(1 for item in items if item["status"] == "pass"),
-            "listed": sum(1 for item in items if item["status"] == "listed"),
-            "potNet": round(sum(dollars(item.get("net")) for item in items if item.get("net") and item["status"] != "pass"), 2),
-        }
+        counts = counts_payload(items)
         self.respond_json({"scan": result, "items": items, "counts": counts, "dropZone": str(CONFIG["drop_zone"])})
 
     def api_bulk_status(self, raw: str):
@@ -803,11 +871,26 @@ class Handler(BaseHTTPRequestHandler):
                 photos = photo_rows(conn, item_id)
                 draft = self.effective_draft(conn, item, data)
                 if data.get("confirm_live") is True:
+                    if CONFIG["ebay"].get("env") == "production" and not CONFIG["ebay"].get("allow_production_publish"):
+                        self.respond_json({"error": "Production publish is disabled. Set EBAY_ALLOW_PRODUCTION_PUBLISH=true only after sandbox testing is complete."}, 403)
+                        return
+                    if CONFIG["ebay"].get("env") == "sandbox" and data.get("confirm_environment") != "sandbox":
+                        self.respond_json({"error": "Sandbox publish requires confirm_environment=sandbox."}, 400)
+                        return
+                    existing = row(
+                        conn,
+                        "SELECT * FROM ebay_listing_publications WHERE item_id = ? AND ebay_env = ?",
+                        (item_id, CONFIG["ebay"].get("env")),
+                    )
+                    if existing:
+                        self.respond_json({"error": f"Item already has an eBay {CONFIG['ebay'].get('env')} publication record for SKU {existing.get('sku')}.", "publication": existing}, 409)
+                        return
                     try:
                         result = publish_live(item, draft, photos, CONFIG["ebay"])
                     except (EbayConfigError, EbayApiError) as exc:
                         self.respond_json({"error": str(exc), "publish": build_publish_plan(item, draft, photos, CONFIG["ebay"])}, 400)
                         return
+                    self.save_ebay_publication(conn, item_id, result)
                     conn.execute("UPDATE items SET status = 'listed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (item_id,))
                     conn.commit()
                     updated = row(conn, "SELECT * FROM items WHERE id = ?", (item_id,))
@@ -1047,6 +1130,117 @@ class Handler(BaseHTTPRequestHandler):
                     str(listing.get("source") or "ebay_browse"),
                 ),
             )
+
+    def deal_scout_candidates(self, conn) -> list[dict]:
+        source_rows = rows(
+            conn,
+            """
+            SELECT
+              items.id,
+              items.brand,
+              items.model,
+              items.condition,
+              market_snapshots.avg_sold_price,
+              market_snapshots.median_sold_price,
+              market_snapshots.expected_sale_price,
+              market_snapshots.sold_count_30d,
+              market_snapshots.confidence_score
+            FROM items
+            JOIN market_snapshots ON market_snapshots.item_id = items.id
+            WHERE COALESCE(items.brand, '') != ''
+              AND COALESCE(items.model, '') != ''
+              AND (
+                market_snapshots.median_sold_price > 0
+                OR market_snapshots.avg_sold_price > 0
+                OR market_snapshots.expected_sale_price > 0
+              )
+            GROUP BY items.id
+            ORDER BY market_snapshots.created_at DESC
+            LIMIT 6
+            """,
+        )
+        reviewed = {
+            review["candidate_key"]: review
+            for review in rows(conn, "SELECT * FROM deal_scout_reviews ORDER BY updated_at DESC")
+        }
+        fee_rate = float(CONFIG["settings"]["fees"]["default_final_value_rate"])
+        packaging = float(CONFIG["settings"]["shipping"].get("packaging_reserve", 1.5))
+        risk_rate = float((CONFIG["settings"]["fees"].get("risk_reserve") or {}).get("default", 0.02))
+        candidates = []
+        seen = set()
+        for source in source_rows:
+            query = " ".join(part for part in [source.get("brand"), source.get("model")] if part).strip()
+            if not query:
+                continue
+            try:
+                browse = browse_search(query, CONFIG["ebay"], limit=12)
+            except (EbayConfigError, EbayApiError):
+                continue
+            sale_estimate = dollars(source.get("median_sold_price")) or dollars(source.get("avg_sold_price")) or dollars(source.get("expected_sale_price"))
+            for listing in browse.get("listings") or []:
+                buy_price = dollars(listing.get("price")) + dollars(listing.get("shipping"))
+                if buy_price <= 0 or sale_estimate <= 0:
+                    continue
+                fees = sale_estimate * fee_rate
+                risk = sale_estimate * risk_rate
+                net_profit = sale_estimate - buy_price - fees - packaging - risk
+                roi = (net_profit / buy_price) * 100 if buy_price else 0
+                key = candidate_key("ebay_browse", str(listing.get("itemId") or ""), query)
+                if key in seen:
+                    continue
+                seen.add(key)
+                action = (reviewed.get(key) or {}).get("action") or "new"
+                candidates.append(
+                    {
+                        "candidateKey": key,
+                        "source": "ebay_browse",
+                        "query": query,
+                        "title": listing.get("title") or "",
+                        "condition": listing.get("condition") or "",
+                        "buyPrice": round(buy_price, 2),
+                        "itemPrice": dollars(listing.get("price")),
+                        "shipping": dollars(listing.get("shipping")),
+                        "estimatedSale": round(sale_estimate, 2),
+                        "estimatedFees": round(fees, 2),
+                        "estimatedProfit": round(net_profit, 2),
+                        "roiPct": round(roi, 1),
+                        "soldCount30d": integer(source.get("sold_count_30d")),
+                        "confidenceScore": integer(source.get("confidence_score")),
+                        "watchers": integer(listing.get("watchers")),
+                        "url": listing.get("url") or "",
+                        "imageUrl": listing.get("imageUrl") or "",
+                        "seller": listing.get("seller") or "",
+                        "reviewAction": action,
+                        "recommendation": "watch" if net_profit >= 25 and roi >= 30 else "review" if net_profit > 0 else "pass",
+                    }
+                )
+        candidates.sort(key=lambda item: (item["recommendation"] == "watch", item["estimatedProfit"], item["roiPct"]), reverse=True)
+        return candidates[:30]
+
+    def save_ebay_publication(self, conn, item_id: int, result: dict) -> None:
+        offer = result.get("offerResponse") or {}
+        publish = result.get("publishResponse") or {}
+        conn.execute(
+            """
+            INSERT INTO ebay_listing_publications (
+              item_id, ebay_env, sku, offer_id, listing_id, status, response_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'published', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(item_id, ebay_env) DO UPDATE SET
+              offer_id = excluded.offer_id,
+              listing_id = excluded.listing_id,
+              status = excluded.status,
+              response_json = excluded.response_json,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                item_id,
+                CONFIG["ebay"].get("env") or "sandbox",
+                result.get("sku") or "",
+                str(offer.get("offerId") or ""),
+                str(publish.get("listingId") or publish.get("listing_id") or ""),
+                json.dumps(result),
+            ),
+        )
 
     def save_market_snapshot(self, conn, item_id: int, values: dict) -> int:
         cursor = conn.execute(
