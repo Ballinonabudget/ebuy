@@ -147,8 +147,13 @@ def readiness(config: dict) -> dict:
         missing_publish.append("userOAuthToken")
     if not config.get("default_category_id"):
         missing_publish.append("categoryId")
+    env = config.get("env", "production")
+    profiles = config.get("profiles", {})
+    production = profiles.get("production", {})
+    allow_production_publish = bool(config.get("allow_production_publish"))
+    production_ready = bool(production.get("ready"))
     return {
-        "env": config.get("env", "production"),
+        "env": env,
         "marketplaceId": config.get("marketplace_id", "EBAY_US"),
         "browseReady": has_app_credentials,
         "listingReady": has_app_credentials and has_user_token and not missing_publish,
@@ -161,8 +166,29 @@ def readiness(config: dict) -> dict:
         "inventoryEndpoint": f"{api_root(config)}/sell/inventory/v1",
         "mediaEndpoint": f"{media_root(config)}/commerce/media/v1_beta/image/create_image_from_file",
         "consentUrl": consent_url(config),
-        "profiles": config.get("profiles", {}),
-        "allowProductionPublish": bool(config.get("allow_production_publish")),
+        "profiles": profiles,
+        "productionReady": production_ready,
+        "productionPublishLocked": not allow_production_publish,
+        "allowProductionPublish": allow_production_publish,
+        "productionDryRunReady": production_ready and env == "production" and not allow_production_publish,
+        "productionLaunchReady": production_ready and allow_production_publish,
+        "productionSafety": [
+            {
+                "label": "Production profile complete",
+                "pass": production_ready,
+                "detail": "Production credentials, seller authorization, policy IDs, merchant location, and category ID must be present.",
+            },
+            {
+                "label": "Live publish lock",
+                "pass": not allow_production_publish,
+                "detail": "Keep EBAY_ALLOW_PRODUCTION_PUBLISH=false while running production dry runs.",
+            },
+            {
+                "label": "Active mode",
+                "pass": env == "production",
+                "detail": "Switch to Production mode only when validating production credentials and payloads.",
+            },
+        ],
     }
 
 
@@ -304,6 +330,8 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
     return {
         "mode": "dry_run",
         "environment": config.get("env", "production"),
+        "allowProductionPublish": bool(config.get("allow_production_publish")),
+        "productionPublishLocked": config.get("env") == "production" and not bool(config.get("allow_production_publish")),
         "sku": sku,
         "canPublish": not missing,
         "missing": missing,
@@ -318,6 +346,7 @@ def build_publish_plan(item: dict, draft: dict, photos: list[dict], config: dict
         "notes": [
             "Dry run only. No live eBay listing is created from this preview.",
             "eBay requires public HTTPS image URLs; local /photo?id=... URLs are not publishable.",
+            "Production mode remains dry-run-only unless EBAY_ALLOW_PRODUCTION_PUBLISH=true.",
         ],
     }
 

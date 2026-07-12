@@ -22,6 +22,46 @@ EBAY_PROFILE_FIELDS = {
 }
 
 
+EBAY_PROFILE_CHECKLIST = [
+    {
+        "group": "App credentials",
+        "fields": [
+            ("CLIENT_ID", "Client ID / App ID"),
+            ("CLIENT_SECRET", "Client Secret / Cert ID"),
+            ("REDIRECT_URI", "RuName / Redirect URI"),
+        ],
+        "required": True,
+    },
+    {
+        "group": "Seller authorization",
+        "fields": [
+            ("REFRESH_TOKEN", "Refresh token"),
+            ("USER_ACCESS_TOKEN", "User access token"),
+        ],
+        "required": True,
+        "any": True,
+        "note": "Use a refresh token for normal operation. A short-lived user access token is acceptable only for temporary testing.",
+    },
+    {
+        "group": "Listing policies",
+        "fields": [
+            ("PAYMENT_POLICY_ID", "Payment policy ID"),
+            ("RETURN_POLICY_ID", "Return policy ID"),
+            ("FULFILLMENT_POLICY_ID", "Fulfillment policy ID"),
+        ],
+        "required": True,
+    },
+    {
+        "group": "Inventory setup",
+        "fields": [
+            ("MERCHANT_LOCATION_KEY", "Merchant location key"),
+            ("DEFAULT_CATEGORY_ID", "Default numeric category ID"),
+        ],
+        "required": True,
+    },
+]
+
+
 def _coerce(value: str):
     raw = value.strip()
     if raw.lower() in {"true", "false"}:
@@ -192,4 +232,45 @@ def ebay_profile_summary(env: dict[str, str], prefix: str, allow_legacy: bool = 
             "DEFAULT_CATEGORY_ID",
         ]
     )
-    return {"hasAppCredentials": has_app, "hasSellerToken": has_seller, "hasListingSetup": has_policies}
+    checklist = []
+    for group in EBAY_PROFILE_CHECKLIST:
+        fields = []
+        present_count = 0
+        for suffix, label in group["fields"]:
+            present = bool(value(suffix))
+            present_count += 1 if present else 0
+            fields.append(
+                {
+                    "key": f"{prefix}_{suffix}",
+                    "legacyKey": f"EBAY_{suffix}" if allow_legacy else "",
+                    "label": label,
+                    "present": present,
+                }
+            )
+        complete = present_count > 0 if group.get("any") else present_count == len(fields)
+        checklist.append(
+            {
+                "group": group["group"],
+                "required": bool(group.get("required")),
+                "complete": complete,
+                "any": bool(group.get("any")),
+                "note": group.get("note", ""),
+                "fields": fields,
+            }
+        )
+    missing = [
+        field["key"]
+        for group in checklist
+        if group["required"] and not group["complete"]
+        for field in group["fields"]
+        if not field["present"]
+    ]
+    ready = all(group["complete"] for group in checklist if group["required"])
+    return {
+        "hasAppCredentials": has_app,
+        "hasSellerToken": has_seller,
+        "hasListingSetup": has_policies,
+        "ready": ready,
+        "missing": missing,
+        "checklist": checklist,
+    }

@@ -1337,6 +1337,15 @@ hr.div {
   background: var(--amber-tint);
   color: var(--amber);
 }
+.profile-setup-btn {
+  width: 100%;
+  margin-top: 8px;
+  justify-content: center;
+}
+.profile-setup-btn.ready {
+  border-color: rgba(126, 211, 33, 0.38);
+  color: var(--moss);
+}
 .validation-panel {
   border: 1px solid var(--line-2);
   border-radius: var(--radius-2);
@@ -1369,6 +1378,129 @@ hr.div {
   color: var(--ink-3);
   font-size: 11px;
   line-height: 1.35;
+}
+.profile-card { width: min(980px, calc(100vw - 44px)); }
+.profile-body {
+  padding: 18px;
+  max-height: min(76vh, 760px);
+  overflow: auto;
+}
+.profile-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.profile-summary {
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-2);
+  padding: 12px;
+  background: var(--bg-1);
+}
+.profile-summary span {
+  display: block;
+  color: var(--ink-3);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.profile-summary strong { color: var(--ink-1); font-size: 18px; }
+.profile-summary.good { border-color: rgba(126, 211, 33, 0.34); }
+.profile-summary.warn { border-color: rgba(245, 166, 35, 0.4); }
+.profile-summary.danger { border-color: rgba(255, 90, 95, 0.5); }
+.profile-note {
+  margin: 12px 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-2);
+  padding: 10px 12px;
+  background: rgba(12, 17, 24, 0.55);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.profile-note code,
+.profile-field code {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.profile-section { margin-top: 16px; }
+.profile-checklist { display: flex; flex-direction: column; gap: 10px; }
+.profile-group {
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-2);
+  padding: 12px;
+  background: var(--bg-1);
+}
+.profile-group.complete { border-left: 3px solid var(--moss); }
+.profile-group.missing { border-left: 3px solid var(--amber); }
+.profile-group-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.profile-group-head strong { color: var(--ink-1); }
+.profile-group-head span {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.profile-group.complete .profile-group-head span { color: var(--moss); }
+.profile-group.missing .profile-group-head span { color: var(--amber); }
+.profile-group p {
+  margin: 6px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.profile-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.profile-field {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-1);
+  padding: 8px;
+}
+.profile-field.present > span { color: var(--moss); }
+.profile-field.missing > span { color: var(--rose); }
+.profile-field strong {
+  display: block;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.profile-url {
+  display: block;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-1);
+  padding: 10px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+.profile-muted {
+  color: var(--ink-3);
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+.profile-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+@media (max-width: 760px) {
+  .profile-summary-grid,
+  .profile-fields {
+    grid-template-columns: 1fr;
+  }
 }
 .deal-scout-card { width: min(1160px, calc(100vw - 44px)); }
 .deal-scout-body {

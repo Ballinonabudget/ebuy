@@ -311,6 +311,7 @@ function renderShell() {
             <button class="mode-btn" data-ebay-mode="sandbox">Sandbox</button>
             <button class="mode-btn" data-ebay-mode="production">Production</button>
           </div>
+          <button class="btn sm profile-setup-btn" id="production-setup-btn">Production setup</button>
         </div>
       </aside>
       <main class="main">
@@ -363,6 +364,7 @@ function renderShell() {
   `;
   $("#scan-btn").addEventListener("click", scanDropZone);
   $("#deal-scout-btn").addEventListener("click", openDealScout);
+  $("#production-setup-btn").addEventListener("click", openProductionSetup);
   $("#search-btn").addEventListener("click", openCommandPalette);
   $("#sort-select").addEventListener("click", () => {
     const idx = sorts.findIndex(([key]) => key === state.sortBy);
@@ -503,8 +505,125 @@ function renderEbayStatus() {
   listing.style.color = status.listingReady ? "var(--moss)" : "var(--amber)";
   env.textContent = status.env || "unknown";
   env.style.color = status.env === "production" ? "var(--rose)" : "var(--moss)";
+  const setup = $("#production-setup-btn");
+  if (setup) {
+    const prod = status.profiles?.production || {};
+    setup.textContent = prod.ready ? "Production dry-run ready" : "Production setup";
+    setup.classList.toggle("ready", !!prod.ready);
+  }
   $$("#ebay-mode-toggle [data-ebay-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.ebayMode === status.env);
+  });
+}
+
+function profileChecklistHtml(profile) {
+  const checklist = profile?.checklist || [];
+  if (!checklist.length) return `<div class="empty">No profile checklist available.</div>`;
+  return `
+    <div class="profile-checklist">
+      ${checklist.map((group) => `
+        <div class="profile-group ${group.complete ? "complete" : "missing"}">
+          <div class="profile-group-head">
+            <strong>${escapeHtml(group.group)}</strong>
+            <span>${group.complete ? "READY" : "MISSING"}</span>
+          </div>
+          ${group.note ? `<p>${escapeHtml(group.note)}</p>` : ""}
+          <div class="profile-fields">
+            ${group.fields.map((field) => `
+              <div class="profile-field ${field.present ? "present" : "missing"}">
+                <span>${field.present ? "✓" : "×"}</span>
+                <div>
+                  <strong>${escapeHtml(field.label)}</strong>
+                  <code>${escapeHtml(field.key)}${field.legacyKey ? ` or ${escapeHtml(field.legacyKey)}` : ""}</code>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function openProductionSetup() {
+  $(".profile-modal")?.remove();
+  const status = state.ebayStatus || {};
+  const prod = status.profiles?.production || {};
+  const sandbox = status.profiles?.sandbox || {};
+  const safety = status.productionSafety || [];
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="overlay profile-modal" role="dialog" aria-modal="true">
+      <div class="modal-card profile-card">
+        <div class="modal-head">
+          <div>
+            <div class="crumb"><span>EBAY PROFILE</span><span>·</span><span>production readiness</span></div>
+            <h2>${prod.ready ? "Production ready for dry runs" : "Production setup incomplete"}</h2>
+          </div>
+          <button class="btn ghost icon" data-modal-close title="Close">✕</button>
+        </div>
+        <div class="profile-body">
+          <div class="profile-summary-grid">
+            <div class="profile-summary ${sandbox.ready ? "good" : "warn"}">
+              <span>Sandbox profile</span>
+              <strong>${sandbox.ready ? "Ready" : "Incomplete"}</strong>
+            </div>
+            <div class="profile-summary ${prod.ready ? "good" : "warn"}">
+              <span>Production profile</span>
+              <strong>${prod.ready ? "Ready" : "Incomplete"}</strong>
+            </div>
+            <div class="profile-summary ${status.productionPublishLocked ? "good" : "danger"}">
+              <span>Live publish lock</span>
+              <strong>${status.productionPublishLocked ? "Locked" : "Unlocked"}</strong>
+            </div>
+          </div>
+          <div class="profile-note">
+            Production keys stay in <code>.env</code>. This screen only shows whether each key is present; it does not display secrets.
+          </div>
+          <div class="profile-section">
+            <div class="section-label">Production required fields</div>
+            ${profileChecklistHtml(prod)}
+          </div>
+          <div class="profile-section">
+            <div class="section-label">Safety checks</div>
+            <div class="validation-grid">
+              ${safety.map((check) => `
+                <div class="validation-row ${check.pass ? "ok" : "warning"}">
+                  <span>${check.pass ? "✓" : "!"}</span>
+                  <div>
+                    <strong>${escapeHtml(check.label)}</strong>
+                    <p>${escapeHtml(check.detail)}</p>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+          <div class="profile-section">
+            <div class="section-label">Production consent URL</div>
+            ${status.env === "production" && status.consentUrl ? `<a class="profile-url" href="${escapeAttr(status.consentUrl)}" target="_blank" rel="noreferrer">${escapeHtml(status.consentUrl)}</a>` : `<p class="profile-muted">Switch to Production mode after adding production client ID and RuName to show the production consent URL.</p>`}
+          </div>
+          <div class="profile-actions">
+            <button class="btn sm" data-copy-env-keys>Copy missing keys</button>
+            <button class="btn primary sm" data-switch-production>Switch to Production</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+  const modal = $(".profile-modal");
+  const close = () => modal?.remove();
+  modal.addEventListener("click", (event) => {
+    if (event.target.classList.contains("profile-modal")) close();
+  });
+  $("[data-modal-close]", modal)?.addEventListener("click", close);
+  $("[data-switch-production]", modal)?.addEventListener("click", async () => {
+    close();
+    await setEbayMode("production");
+  });
+  $("[data-copy-env-keys]", modal)?.addEventListener("click", async () => {
+    const missing = prod.missing || [];
+    const text = missing.length ? missing.map((key) => `${key}=`).join("\n") : "Production profile has no missing required keys.";
+    await navigator.clipboard?.writeText(text);
+    toast("Production key list copied", "amber");
   });
 }
 
@@ -1265,6 +1384,7 @@ function openPublishModal(plan, item = null) {
   const missing = plan?.missing || [];
   const firstMissing = missing[0] || "";
   const isListed = item && (item.status === "listed" || item.queue === "listed" || item.engineStatus === "listed");
+  const isProductionDryRun = plan?.environment === "production" && plan?.productionPublishLocked;
   const canCreateSandbox = item && !isListed && plan?.canPublish && plan?.environment === "sandbox";
   document.body.insertAdjacentHTML("beforeend", `
     <div class="overlay publish-modal" role="dialog" aria-modal="true">
@@ -1280,8 +1400,9 @@ function openPublishModal(plan, item = null) {
           <div class="publish-summary ${missing.length ? "warn" : "good"}">
             <div class="mono">SKU</div>
             <strong>${escapeHtml(plan?.sku || "—")}</strong>
-            <p>${missing.length ? "Fix these fields before a live eBay listing can be created." : "All required local publish fields are present. Live publish still requires explicit confirm_live=true."}</p>
+            <p>${missing.length ? "Fix these fields before a live eBay listing can be created." : isProductionDryRun ? "Production dry run is passing locally. Live publish is still locked by EBAY_ALLOW_PRODUCTION_PUBLISH=false." : "All required local publish fields are present. Live publish still requires explicit confirm_live=true."}</p>
           </div>
+          ${isProductionDryRun ? `<div class="profile-note">Production safety lock is active. This modal validates payloads and endpoints without creating a live listing.</div>` : ""}
           <div class="missing-grid">
             ${missing.length ? missing.map((item, index) => `<button type="button" class="missing-chip ${index === 0 ? "active" : ""}" data-blocker="${escapeAttr(item)}">${escapeHtml(item)}</button>`).join("") : `<span class="missing-chip good">No blocking missing fields</span>`}
           </div>
