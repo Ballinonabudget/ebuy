@@ -1,259 +1,219 @@
-# eBay Engine Project Status
+# eBuy — Project State & Handoff Document
 
-Last updated: 2026-05-13
+Last updated: 2026-07-12 (by Claude Code)
+Previous revision: 2026-05-13
 
-## Current Stage
+> **Handoff rule:** This file is the single source of truth for project state.
+> Any agent (OpenAI Codex, Claude Code, or human) MUST read this file before
+> working, and MUST update Section 9 (Session Log) and any changed sections
+> before ending a work session. Commit and push after every meaningful change.
 
-Stage 4: Pre-API local listing workflow MVP.
+---
 
-The app is no longer just a folder importer. It can now ingest item folders, read `Gist-template.txt`, store inventory in SQLite, run best-effort eBay market research, calculate resale math, and produce a recommendation plus draft listing text.
+## 1. Identity & Locations
 
-## Working App
+| What | Where |
+|---|---|
+| Project name | eBuy (a.k.a. "ebuy", historically "Ebay Engine" / "epay") |
+| GitHub | https://github.com/Ballinonabudget/ebuy (public — never commit secrets) |
+| Local working copy | `/Users/miniman/Documents/Codex/2026-05-07/use-the-google-drive-doc-epay` |
+| Run | `python3 app.py` → http://127.0.0.1:8787/ui |
+| Drop zone (item photos + gists) | `/Users/miniman/eBay_Drop/` |
+| Database | `data/ebay_engine.db` (SQLite, git-ignored) |
+| Secrets | `.env` (git-ignored; template in `.env.example`) |
+| Backup plan | `~/Documents/Codex/2026-05-15/to-ensure-this-directive-is-perfectly/Ebuy Backup and Restore Plan - 2026-05-16.txt` |
 
-Local URL:
+**Purpose:** local-first resale command center — drop item photos + a gist
+note into `eBay_Drop/`, import them, research comps, get a price/format/
+profit recommendation and a draft listing package, then (sandbox today,
+production later) create the eBay listing. Nothing publishes to production
+without an explicit unlock (see §6).
 
-```text
-http://127.0.0.1:8787
+**Related-but-separate:** `/Users/miniman/Epay/` was an older abandoned
+scaffold for the same idea; deleted 2026-07-12 (in Trash as
+`Epay-removed-2026-07-12`). Do not resurrect it.
+
+---
+
+## 2. Architecture
+
+Standard-library-only Python web app (no framework, no pip installs needed
+to run the core app).
+
+```
+app.py                      → entry point, starts server
+ebay_engine/
+  server.py                 → HTTP routes + HTML rendering (largest module)
+  config.py                 → .env + settings.yaml loading, eBay profile
+                              system (sandbox/production prefixed keys with
+                              legacy fallback), readiness checklist
+  db.py                     → SQLite schema + access
+  intake.py                 → drop-zone scanner, gist.txt / Gist-template.txt parsing
+  market.py                 → pre-API market research (best-effort webpage parsing)
+  recommend.py              → profit math + recommendation labels
+  ebay_api.py               → official eBay REST integration: OAuth tokens
+                              (app + user), consent URL, Browse search,
+                              media/EPS image upload, inventory item + offer
+                              creation, validate, publish plan (dry-run),
+                              publish_live, readiness checks
+static/modern.js|.css       → single-page UI shell ("FlipBench-style")
+templates/                  → legacy server-rendered pages (item, layout)
+settings.yaml               → business defaults: shipping, returns, photo
+                              minimums/angles per category, fee model, pricing
+                              strategy (see file — it is the policy source)
+tools/create_ebay_sandbox_defaults.py → one-shot: creates sandbox policies/
+                              location and prints the IDs for .env
 ```
 
-Project folder:
+**Key API routes:** `/api/items` (+ `/api/items/{id}/research|draft|publish`),
+`/api/scan`, `/api/audit`, `/api/ebay/status`, `/api/ebay/mode`.
 
-```text
-/Users/miniman/Documents/Codex/2026-05-07/use-the-google-drive-doc-epay
-```
+**DB tables:** `items`, `photos`, `market_snapshots`, `recommendations`,
+`listing_drafts`, `sales`, `ebay_listing_publications`, `photo_publications`,
+`market_competition`, `deal_scout_reviews`.
 
-Drop zone:
+**eBay credential profiles:** `.env` keys are prefixed `EBAY_SANDBOX_*` /
+`EBAY_PRODUCTION_*` (legacy unprefixed `EBAY_*` still read as sandbox
+fallback). Active mode is switched in the UI (`/api/ebay/mode`).
 
-```text
-/Users/miniman/eBay_Drop
-```
+---
 
-Run command from the project folder:
+## 3. Change history (all commits)
 
-```bash
-python3 app.py
-```
+| Date | Commit | What it added |
+|---|---|---|
+| 2026-05-16 | `c39fe11` Initial Ebuy automation app | Everything in the 2026-05-13 status doc: intake, gist parsing, SQLite inventory, best-effort market research (median, outlier filter, confidence), profit math, recommendation labels, draft title/HTML description, listing package screen, photo thumbnails + cover selection, sold/profit tracking, `settings.yaml` defaults, `EBAY_ENGINE_DEFAULTS_BRIEF.md` |
+| 2026-06-12 | `ba81d91` Add eBay sandbox listing workflow | First official eBay API integration (`ebay_api.py`, 483 lines): OAuth app/user tokens, EPS image upload, inventory item + offer creation, validation, dry-run publish plan, live publish; `tools/create_ebay_sandbox_defaults.py`; publish UI |
+| 2026-06-12 | `6efb825` Add eBay mode profiles and deal scout | Sandbox vs production credential profiles with UI mode toggle; Deal Scout feature; `/api/ebay/status` readiness reporting |
+| 2026-07-12 | `81526e3` Add production readiness checklist and publish safety gates | Production Setup modal: grouped credential checklist (shows presence only, never secrets), safety checks, consent URL, copy-missing-keys; production stays dry-run-only unless `EBAY_ALLOW_PRODUCTION_PUBLISH=true`. (Written 2026-06-12, sat uncommitted for a month, committed during 2026-07-12 audit.) |
 
-## What Is Built
+---
 
-- Local Python web app using standard library only.
-- SQLite database at `data/ebay_engine.db`.
-- Configurable defaults in `settings.yaml`.
-- Drop-zone scanner for item folders.
-- Accepts `gist.txt` and `Gist-template.txt`.
-- Parses item metadata:
-  - brand
-  - model
-  - category
-  - item type
-  - size
-  - condition
-  - box/package
-  - accessories
-  - tested
-  - defects
-  - COGS
-  - notes
-- Imports photo file records.
-- Category-specific minimum photo counts:
-  - clothing/socks: 3
-  - accessories: 3
-  - electronics: 5
-  - sneakers: 6
-- Best-effort eBay auto research button.
-- Auto research estimates:
-  - 30-day average sold
-  - median sold price
-  - outlier-filtered sold range
-  - expected sale price
-  - active listing count
-  - sold count
-  - sell-through rate
-  - confidence score
-- Profit math:
-  - eBay fee estimate
-  - order fee
-  - packaging reserve
-  - risk reserve
-  - net profit
-  - ROI
-- Basic recommendations:
-  - `NEEDS_COMPS`
-  - `LIST`
-  - `PASS_OR_REPRICE`
-  - `LIST_ONLY_IF_CASHFLOW`
-  - `WATCH_SATURATION`
-- Draft title generation.
-- Draft eBay HTML description generation.
-- Editable item metadata screen.
-- Clean listing package section with:
-  - recommended title
-  - recommended price
-  - readable listing preview
-  - copy-ready eBay HTML
-  - shipping defaults
-  - returns defaults
-  - profit summary
-  - warning checklist
-- Clearer recommendation labels:
-  - `SELL_NOW`
-  - `SELL_FAST`
-  - `LIST_MARKET`
-  - `HOLD`
-  - `DO_NOT_BUY`
-  - `NEEDS_MORE_INFO`
-  - `BAD_COMP_MATCH`
-- Market confidence, sampled sold count, sampled active count, active/sold pressure, and review links.
-- Better pre-API research:
-  - median sold price
-  - outlier filtering
-  - low/high filtered sold range
-  - confidence score
-  - query builder prefers UPC/style code when available
-  - condition-aware search terms
-- Photo workflow:
-  - photo thumbnails from imported folders
-  - cover photo selection
-  - category angle checklist
-- Local sale tracking:
-  - sale price
-  - actual eBay fees
-  - actual shipping cost
-  - sold date
-  - actual profit
-  - mark item sold
-- Status tracking:
-  - pending
-  - needs_info
-  - ready
-  - approved
-  - listed
-  - sold
-  - archived
+## 4. Current state (verified 2026-07-12)
 
-## Current Test Items
+- Working tree **clean**, local == `origin/main` @ `81526e3`.
+- `.env` exists and is populated (last edited 2026-06-12). Sandbox
+  credentials appear configured; production profile not filled.
+- **Database contents:** 5 items — Rode VideoMic Go (**status: listed** —
+  sandbox), Adidas Soccer Metro Sock, Nike Spark, and 2 items with no
+  brand/model parsed (ids 3, 4 — likely the JOBY Action Grip and JOBY Wavo
+  AIR; their `eBay_Drop` folders have gist templates but **no photos**).
+  11 photos imported, 10 photo publications (sandbox EPS uploads), 6 market
+  snapshots, 7 recommendations. `listing_drafts`, `sales`,
+  `deal_scout_reviews`, `market_competition` are empty.
+- `ebay_listing_publications` is **empty** despite the Rode Mic being
+  `listed` — the sandbox publish either predated that table or wasn't
+  recorded. Worth a look when resuming sandbox work.
+- Not runtime-verified this session (app was not booted on 2026-07-12);
+  last known-good run was the 2026-06-12 session. Python + JS pass syntax
+  checks as of `81526e3`.
 
-Imported from `/Users/miniman/eBay_Drop`:
+---
 
-- Adidas Socks
-- Nike Socks
-- Rode Mic
-- JOBY Action Grip
-- JOBY Wavo AIR 2-Person
+## 5. What works (capability summary)
 
-Example result:
+Intake → research → decide → package → (sandbox) list:
 
-Rode Mic auto research found an expected sale price around `$29-$30` against `$50` COGS, so the app recommended `PASS_OR_REPRICE`.
+1. **Intake:** scan `eBay_Drop/`, parse `gist.txt`/`Gist-template.txt`
+   (brand, model, size, condition, box, accessories, tested, defects, COGS,
+   notes), import photos, per-category minimum photo counts + angle checklists.
+2. **Research (pre-API, best-effort scraping):** 30-day avg/median sold,
+   outlier-filtered range, expected price, active count, sell-through rate,
+   confidence score; UPC/style-code-aware, condition-aware queries.
+   **Plus** official Browse API search when sandbox/production creds active.
+3. **Decide:** fee model from `settings.yaml`, packaging + risk reserves,
+   net profit, ROI; labels `SELL_NOW / SELL_FAST / LIST_MARKET / HOLD /
+   DO_NOT_BUY / NEEDS_MORE_INFO / BAD_COMP_MATCH`.
+4. **Package:** draft title, readable preview + copy-ready eBay HTML,
+   shipping/returns defaults, warnings checklist, editable metadata.
+5. **List (sandbox):** EPS photo upload, inventory item + offer, validate,
+   dry-run publish plan, live publish — exercised against sandbox 2026-06-12
+   (Rode Mic). Production is gated (§6).
+6. **Track:** item statuses `pending → needs_info → ready → approved →
+   listed → sold → archived`; sale price/fees/shipping/profit recording.
+7. **Extras:** Deal Scout (built 2026-06-12, unused so far — 0 reviews),
+   Production Setup readiness modal, `/api/audit`.
 
-## Current Limitations
+---
 
-- Product identification still depends mostly on `Gist-template.txt`.
-- Auto research uses best-effort eBay webpage parsing, not official eBay API.
-- Comp notes are internal research notes, not listing text.
-- Auto research confidence is still heuristic and based on best-effort page parsing.
-- Manual market snapshot saves do not preserve prior auto-research review links unless auto research is run again.
-- Photo preview and cover selection exist, but drag reorder is not built yet.
-- No official eBay draft creation yet.
-- No eBay OAuth flow yet.
-- No sale/order sync.
-- No mobile scanning/capture workflow.
-- No AI image/product recognition yet.
+## 6. Safety & workflow rules (both agents MUST follow)
 
-## Completed Step: Step 3
+1. **Production publish lock:** `EBAY_ALLOW_PRODUCTION_PUBLISH=false` stays
+   false until production dry runs pass AND the user explicitly asks for a
+   real listing. `server.py` enforces this on the publish route; do not
+   bypass or "helpfully" flip it.
+2. **Never commit** `.env`, `data/*.db`, or `eBay_Drop` content. Repo is
+   public.
+3. **Commit + push after every meaningful change** (user's standing backup
+   rule). Small, described commits.
+4. **User approval before anything outward-facing:** live listings,
+   publishing photos to production EPS, any spend.
+5. **Backups:** after inventory-import or DB-changing sessions, remind the
+   user to back up `.env` + `ebay_engine.db` + `eBay_Drop` per the backup
+   plan doc (§1). Automation for this is a wishlist item.
 
-Step 3 is complete when:
+---
 
-- You can edit item metadata without touching `Gist-template.txt`.
-- You can click one item and see a clean copy-paste listing package.
-- The app shows warnings before listing, such as:
-  - missing COGS
-  - missing condition
-  - missing photos
-  - low/negative profit
-  - possible bad comp match
-- The draft description has both:
-  - readable preview
-  - copy-ready eBay HTML
-- The app gives a clearer action recommendation than `PASS_OR_REPRICE`.
+## 7. Roadmap
 
-## Completed Step: Step 4
+**Step 5 — eBay API integration: IN PROGRESS (sandbox done, production pending)**
+- [x] OAuth (app + user tokens, consent URL)
+- [x] Official Browse search
+- [x] EPS image upload, inventory item + offer creation, validation
+- [x] Sandbox end-to-end listing (Rode Mic, 2026-06-12)
+- [x] Mode profiles + readiness checklist + publish safety gates
+- [ ] Production credentials in `.env` (user task — checklist modal shows gaps)
+- [ ] Production dry-run pass
+- [ ] First real listing (requires explicit user go + publish unlock)
+- [ ] Category suggestion API (still using default category ID)
+- [ ] Record publications consistently in `ebay_listing_publications` (§4 gap)
 
-Better market research:
+**Step 6 — photo workflow:** drag reorder, AI image-quality review.
+**Step 7 — sales/profit:** monthly profit goal dashboard; sale/order sync from eBay.
+**Step 8 — mobile companion:** phone capture, UPC scan, in-store buy/pass.
+**Step 9 — full automation:** AI product ID from photos → auto research →
+auto draft → user approves → publish + tracking. (The old `/Users/miniman/Epay`
+scaffold attempted this with Claude Vision; deleted, but the idea stands.)
 
-- Median sold price
-- Outlier removal
-- New vs used matching through condition-aware query terms
-- Price range
-- Confidence score
-- Better query builder
-- UPC/style-code-aware search
+**Immediate next actions (in order):**
+1. Boot the app, confirm nothing rotted since 2026-06-12; check the
+   `listed`-but-unrecorded Rode Mic publication (§4).
+2. Photograph the two JOBY items (their folders have no photos) or archive
+   those items.
+3. Fill production profile in `.env` via the Production Setup checklist;
+   run `tools/create_ebay_sandbox_defaults.py` equivalent for production
+   policies if needed.
+4. Production dry-run → review plan output → ask user for go/no-go on one
+   real listing (candidate: Rode VideoMic Go, but re-check comps — May
+   research said PASS_OR_REPRICE at $50 COGS vs ~$29 expected).
 
-## Completed Pre-API Local Workflow Additions
+---
 
-- Photo thumbnails
-- Cover photo selection
-- Category angle checklist
-- Local sold/profit tracking
+## 8. Cross-agent handoff protocol (Codex ⇄ Claude Code)
 
-## Next Step: Step 5
+- **Read order for a cold start:** this file → `README.md` →
+  `EBAY_ENGINE_DEFAULTS_BRIEF.md` → `settings.yaml` → skim
+  `ebay_engine/server.py` route table.
+- **State lives in three places only:** this doc (intent/status), git
+  history (code truth), SQLite DB (data truth). If they disagree, trust git
+  and the DB, then fix this doc.
+- **Before ending a session:** update §4 (current state) and §7 (check off
+  / reorder), append a §9 log entry, commit, push.
+- **Claude Code note:** persistent memory for this project exists in
+  Claude's memory dir (`project_epay_engine.md`); it mirrors this doc and
+  should be updated when this doc changes materially.
+- **Codex note:** historical Codex task folders live under
+  `~/Documents/Codex/2026-05-*`; this project folder is the only live one.
+- Uncommitted work is considered lost work — the 81526e3 feature sat
+  invisible for a month. Don't leave the tree dirty.
 
-eBay API Integration:
+---
 
-- eBay OAuth
-- category suggestions
-- official active listing search
-- draft inventory item creation
-- offer creation
-- draft listing creation
-- manual approval before publishing
+## 9. Session log
 
-## Later Roadmap
-
-Step 5: eBay API Integration
-
-- eBay OAuth
-- category suggestions
-- official active listing search
-- draft inventory item creation
-- offer creation
-- draft listing creation
-- manual approval before publishing
-
-Step 6: Photo Workflow Enhancements
-
-- reorder photos
-- missing angle checklist
-- future AI image quality review
-
-Step 7: Sales and Profit Tracking Enhancements
-
-- monthly profit goal dashboard
-
-Step 8: Mobile Companion
-
-- phone capture flow
-- barcode/UPC scan
-- in-store buy/pass screen
-- shelf price input
-- market analysis on phone
-
-Step 9: Full Automation
-
-- AI identifies products from photos
-- app researches market automatically
-- app drafts title/description/item specifics
-- app creates eBay draft
-- user approves
-- app publishes/schedules
-- app tracks sale/profit
-
-## Prompt For New Thread
-
-Use this prompt to continue:
-
-```text
-We are building the local eBay Engine app in:
-/Users/miniman/Documents/Codex/2026-05-07/use-the-google-drive-doc-epay
-
-Read PROJECT_STATUS.md first. Continue with Step 3: build the Listing Package + Editable Item Fields screen. Keep the app local-first, lightweight, and usable for weekend resale listing. Do not start eBay API integration yet.
-```
+| Date | Agent | Summary |
+|---|---|---|
+| 2026-05-13 | Codex | Status doc written at Stage 4 (pre-API MVP complete) |
+| 2026-05-16 | Codex | Initial commit pushed to GitHub; backup plan doc written |
+| 2026-06-12 | Codex | Sandbox listing workflow + mode profiles + deal scout committed; readiness-checklist feature written but left uncommitted; sandbox listing of Rode Mic |
+| 2026-07-12 | Claude Code | Full audit; committed + pushed the stranded readiness-checklist feature (`81526e3`); deleted legacy `/Users/miniman/Epay` scaffold (→ Trash); rewrote this doc as the standing handoff schematic |
