@@ -28,8 +28,17 @@ CREATE TABLE IF NOT EXISTS items (
   defects TEXT,
   notes TEXT,
   cogs REAL NOT NULL DEFAULT 0,
+  retail_price REAL,
+  release_date TEXT,
+  kicksdb_verified INTEGER DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS kicksdb_cache (
+  sku TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS photos (
@@ -179,6 +188,9 @@ MIGRATIONS = {
         "color": "TEXT",
         "tested": "TEXT",
         "defects": "TEXT",
+        "retail_price": "REAL",
+        "release_date": "TEXT",
+        "kicksdb_verified": "INTEGER DEFAULT 0",
     },
     "photos": {
         "sort_order": "INTEGER DEFAULT 0",

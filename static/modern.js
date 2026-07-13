@@ -912,6 +912,41 @@ function updateSummary(item) {
   }
 }
 
+function kicksdbCard(item) {
+  const kicks = item.kicksdb;
+  const hasData = kicks && (kicks.verified || kicks.name || kicks.image);
+  if (!hasData) {
+    if (!item.styleCode) return "";
+    return `
+      <div class="attr-grid">
+        <div class="attr-grid-title">KicksDB · Catalog Reference</div>
+        <div class="attr-row"><span class="k">Style ${escapeHtml(item.styleCode)}</span><span class="v" style="color:var(--ink-3)">Not enriched yet — use the KicksDB enrich button</span></div>
+      </div>
+    `;
+  }
+  const rows = [
+    ["Catalog name", kicks.name],
+    ["Colorway", kicks.colorway],
+    ["Retail", kicks.retailPrice != null ? money(kicks.retailPrice) : ""],
+    ["Released", kicks.releaseDate],
+  ].filter(([, value]) => value);
+  return `
+    <div class="attr-grid">
+      <div class="attr-grid-title">KicksDB · Catalog Reference ${kicks.verified ? "· SKU match ✓" : "· unverified"}</div>
+      ${kicks.image ? `
+        <img src="${escapeHtml(kicks.image)}" alt="KicksDB stock photo" loading="lazy" style="width:100%;border-radius:10px;margin:8px 0 4px;background:var(--paper-2)">
+        <div class="hint" style="margin-bottom:8px">Stock image — reference only. Confirm it matches your photos; eBay requires your own shots.</div>
+      ` : ""}
+      ${rows.map(([key, value]) => `
+        <div class="attr-row">
+          <span class="k">${escapeHtml(key)}</span>
+          <span class="v">${escapeHtml(value)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function overlayHtml(item, index, total) {
   const roi = roiPct(item);
   const isReady = item.financial?.verdict === "approve" || item.status === "ready";
@@ -971,6 +1006,7 @@ function overlayHtml(item, index, total) {
                 </div>
               `).join("")}
             </div>
+            ${kicksdbCard(item)}
           </div>
           <div class="review-right">
             <div class="reco" style="background:linear-gradient(135deg,var(--${verdictColor === "moss" ? "moss-tint" : verdictColor === "rose" ? "rust-tint" : "amber-tint"}),transparent);border-color:var(--${verdictColor === "moss" ? "moss" : verdictColor === "rose" ? "rose" : "amber"})">
@@ -1042,6 +1078,7 @@ function overlayHtml(item, index, total) {
           <div class="cta-actions">
             <button class="btn danger sm" data-status="archived">Reject<span class="kbd">X</span></button>
             <button class="btn sm" data-status="needs_info">Need pix</button>
+            <button class="btn sm" data-enrich>KicksDB enrich</button>
             <button class="btn sm" data-research>More research</button>
             <button class="btn sm" data-preview-listing>Preview listing</button>
             <button class="btn sm" data-upload-ebay-photos>Upload photos</button>
@@ -1079,6 +1116,7 @@ function wireOverlay(item) {
   $(".overlay [data-prev]")?.addEventListener("click", () => navOverlay(-1));
   $(".overlay [data-save-draft]")?.addEventListener("click", () => saveDraft(item.id));
   $(".overlay [data-research]")?.addEventListener("click", () => runResearch(item.id));
+  $(".overlay [data-enrich]")?.addEventListener("click", () => runEnrich(item.id));
   $$(".overlay [data-preview-listing]").forEach((button) => button.addEventListener("click", () => openListingPreview(item)));
   $(".overlay [data-upload-ebay-photos]")?.addEventListener("click", () => uploadEbayPhotos(item));
   $(".overlay [data-publish-dry-run]")?.addEventListener("click", () => runPublishDryRun(item));
@@ -1544,6 +1582,37 @@ async function runResearch(id) {
     if (freshButton) {
       freshButton.disabled = false;
       freshButton.textContent = "More research";
+    }
+  }
+}
+
+async function runEnrich(id) {
+  const button = $(".overlay [data-enrich]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Enriching...";
+  }
+  try {
+    const data = await postJson(`/api/items/${id}/enrich`, {});
+    const outcome = data.enrich || {};
+    if (outcome.status === "enriched") {
+      const filled = (outcome.filled || []).join(", ");
+      toast(filled ? `KicksDB filled: ${filled}` : "KicksDB verified · nothing blank to fill", "moss");
+    } else if (outcome.status === "mismatch") {
+      toast(`KicksDB SKU mismatch · ${outcome.reason || "not merged"}`, "teal");
+    } else {
+      toast(outcome.reason || "Enrich skipped", "amber");
+    }
+    updateSummary(data.item);
+    await loadItems();
+    await refreshOpenOverlay(id);
+  } catch (error) {
+    toast(`Enrich failed · ${error.message}`, "teal");
+  } finally {
+    const freshButton = $(".overlay [data-enrich]");
+    if (freshButton) {
+      freshButton.disabled = false;
+      freshButton.textContent = "KicksDB enrich";
     }
   }
 }

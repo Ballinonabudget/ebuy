@@ -21,6 +21,7 @@ from .ebay_api import (
     upload_media_image_from_file,
 )
 from .intake import scan_drop_zone
+from .kicksdb import KicksDBError, auto_enrich_candidate, cache_key, enrich_item
 from .market import research_item
 from .recommend import latest_recommendation
 
@@ -417,6 +418,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_ebay_mode(raw)
         if parsed.path == "/api/deal-scout/review":
             return self.api_deal_scout_review(raw)
+        if parsed.path == "/api/enrich/backfill":
+            return self.api_enrich_backfill()
         if parsed.path == "/api/items/bulk-status":
             return self.api_bulk_status(raw)
         if parsed.path.startswith("/api/items/"):
@@ -557,6 +560,32 @@ class Handler(BaseHTTPRequestHandler):
                 "rule": "min 60%",
             },
         ]
+        kicksdb_payload = {
+            "verified": bool(item.get("kicksdb_verified")),
+            "retailPrice": item.get("retail_price"),
+            "releaseDate": item.get("release_date") or "",
+            "name": "",
+            "colorway": "",
+            "image": "",
+            "fetchedAt": "",
+        }
+        style_code = str(item.get("style_code") or "").strip()
+        if style_code:
+            cache = row(
+                conn,
+                "SELECT payload_json, fetched_at FROM kicksdb_cache WHERE sku = ?",
+                (cache_key(style_code),),
+            )
+            if cache:
+                cached_record = json.loads(cache["payload_json"])
+                kicksdb_payload.update(
+                    {
+                        "name": cached_record.get("name") or "",
+                        "colorway": cached_record.get("colorway") or "",
+                        "image": cached_record.get("product_image") or "",
+                        "fetchedAt": cache.get("fetched_at") or "",
+                    }
+                )
         market_payload = {
             "fetchedAt": (market or {}).get("created_at"),
             "activeUrl": (market or {}).get("active_url") or "",
@@ -613,6 +642,7 @@ class Handler(BaseHTTPRequestHandler):
                     "photos": photo_urls,
                     "defects": defects,
                 },
+                "kicksdb": kicksdb_payload,
                 "market": market_payload,
                 "financial": {
                     "cogs": payload["cogs"],
@@ -716,10 +746,53 @@ class Handler(BaseHTTPRequestHandler):
     def api_scan(self):
         with connect(CONFIG["database_path"]) as conn:
             result = scan_drop_zone(conn, CONFIG["drop_zone"])
+            result["enrichment"] = self.auto_enrich(conn, result)
             db_items = rows(conn, "SELECT * FROM items ORDER BY updated_at DESC, id DESC")
             items = [self.item_payload(conn, item, full=False) for item in db_items]
         counts = counts_payload(items)
         self.respond_json({"scan": result, "items": items, "counts": counts, "dropZone": str(CONFIG["drop_zone"])})
+
+    def auto_enrich(self, conn, scan_result: dict) -> list[dict]:
+        """KicksDB-enrich items imported by this scan (sneakers with a style code)."""
+        folders = [
+            detail["folder"]
+            for detail in scan_result.get("details", [])
+            if detail.get("status") == "imported"
+        ]
+        outcomes: list[dict] = []
+        for folder in folders:
+            item = row(conn, "SELECT * FROM items WHERE folder_name = ?", (folder,))
+            if not item or not auto_enrich_candidate(item):
+                continue
+            try:
+                outcome = enrich_item(conn, item)
+            except KicksDBError as exc:
+                outcome = {"itemId": int(item["id"]), "status": "error", "reason": str(exc)}
+            outcome["folder"] = folder
+            outcome.pop("record", None)
+            outcomes.append(outcome)
+        if outcomes:
+            conn.commit()
+        return outcomes
+
+    def api_enrich_backfill(self):
+        """One-shot: enrich every item that has a style code and isn't verified yet."""
+        outcomes: list[dict] = []
+        with connect(CONFIG["database_path"]) as conn:
+            candidates = rows(
+                conn,
+                "SELECT * FROM items WHERE TRIM(COALESCE(style_code, '')) != '' AND COALESCE(kicksdb_verified, 0) = 0",
+            )
+            for item in candidates:
+                try:
+                    outcome = enrich_item(conn, item)
+                except KicksDBError as exc:
+                    outcome = {"itemId": int(item["id"]), "status": "error", "reason": str(exc)}
+                outcome.pop("record", None)
+                outcomes.append(outcome)
+            conn.commit()
+        enriched = sum(1 for outcome in outcomes if outcome.get("status") == "enriched")
+        self.respond_json({"candidates": len(outcomes), "enriched": enriched, "outcomes": outcomes})
 
     def api_bulk_status(self, raw: str):
         data = self.read_json(raw)
@@ -790,6 +863,17 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot_id = self.save_market_snapshot(conn, item_id, result)
                 if competition:
                     self.replace_api_competition(conn, item_id, snapshot_id, competition)
+            elif action == "enrich":
+                try:
+                    result = enrich_item(conn, item)
+                except KicksDBError as exc:
+                    self.respond_json({"error": str(exc)}, 400)
+                    return
+                result.pop("record", None)
+                conn.commit()
+                updated = row(conn, "SELECT * FROM items WHERE id = ?", (item_id,))
+                self.respond_json({"item": self.item_payload(conn, updated, full=True), "enrich": result})
+                return
             elif action == "cover":
                 photo_id = integer(data.get("photo_id"))
                 conn.execute("UPDATE photos SET role = NULL WHERE item_id = ?", (item_id,))
