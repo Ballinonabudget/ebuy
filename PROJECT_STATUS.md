@@ -1,7 +1,7 @@
 # eBuy — Project State & Handoff Document
 
-Last updated: 2026-07-12 (by Claude Code)
-Previous revision: 2026-05-13
+Last updated: 2026-07-13 (by Claude Code)
+Previous revision: 2026-07-12
 
 > **Handoff rule:** This file is the single source of truth for project state.
 > Any agent (OpenAI Codex, Claude Code, or human) MUST read this file before
@@ -50,6 +50,11 @@ ebay_engine/
   db.py                     → SQLite schema + access
   intake.py                 → drop-zone scanner, gist.txt / Gist-template.txt parsing
   market.py                 → pre-API market research (best-effort webpage parsing)
+  kicksdb.py                → KicksDB sneaker catalog enrichment: cache-first
+                              SKU lookup (kicksdb_cache), fill-blanks-only
+                              merge onto items, SKU mismatch guard, stock
+                              image reference-only. Inspector:
+                              python3 -m ebay_engine.kicksdb <SKU>
   recommend.py              → profit math + recommendation labels
   ebay_api.py               → official eBay REST integration: OAuth tokens
                               (app + user), consent URL, Browse search,
@@ -65,12 +70,13 @@ tools/create_ebay_sandbox_defaults.py → one-shot: creates sandbox policies/
                               location and prints the IDs for .env
 ```
 
-**Key API routes:** `/api/items` (+ `/api/items/{id}/research|draft|publish`),
-`/api/scan`, `/api/audit`, `/api/ebay/status`, `/api/ebay/mode`.
+**Key API routes:** `/api/items` (+ `/api/items/{id}/research|draft|publish|enrich`),
+`/api/scan`, `/api/audit`, `/api/ebay/status`, `/api/ebay/mode`,
+`/api/enrich/backfill`.
 
 **DB tables:** `items`, `photos`, `market_snapshots`, `recommendations`,
 `listing_drafts`, `sales`, `ebay_listing_publications`, `photo_publications`,
-`market_competition`, `deal_scout_reviews`.
+`market_competition`, `deal_scout_reviews`, `kicksdb_cache`.
 
 **eBay credential profiles:** `.env` keys are prefixed `EBAY_SANDBOX_*` /
 `EBAY_PRODUCTION_*` (legacy unprefixed `EBAY_*` still read as sandbox
@@ -86,14 +92,24 @@ fallback). Active mode is switched in the UI (`/api/ebay/mode`).
 | 2026-06-12 | `ba81d91` Add eBay sandbox listing workflow | First official eBay API integration (`ebay_api.py`, 483 lines): OAuth app/user tokens, EPS image upload, inventory item + offer creation, validation, dry-run publish plan, live publish; `tools/create_ebay_sandbox_defaults.py`; publish UI |
 | 2026-06-12 | `6efb825` Add eBay mode profiles and deal scout | Sandbox vs production credential profiles with UI mode toggle; Deal Scout feature; `/api/ebay/status` readiness reporting |
 | 2026-07-12 | `81526e3` Add production readiness checklist and publish safety gates | Production Setup modal: grouped credential checklist (shows presence only, never secrets), safety checks, consent URL, copy-missing-keys; production stays dry-run-only unless `EBAY_ALLOW_PRODUCTION_PUBLISH=true`. (Written 2026-06-12, sat uncommitted for a month, committed during 2026-07-12 audit.) |
+| 2026-07-13 | `5d92c51` Add KicksDB catalog enrichment stage | `ebay_engine/kicksdb.py` ported from outlet-plug-blog (urllib, stdlib-only); `kicksdb_cache` table (one API call per SKU ever); fill-blanks-only merge of brand/model/color/retail_price/release_date; SKU mismatch guard; triggers = auto-on-scan (sneakers w/ style code) + overlay button + `/api/enrich/backfill`; `items` gains `retail_price`, `release_date`, `kicksdb_verified` |
 
 ---
 
-## 4. Current state (verified 2026-07-12)
+## 4. Current state (verified 2026-07-13)
 
-- Working tree **clean**, local == `origin/main` @ `81526e3`.
-- `.env` exists and is populated (last edited 2026-06-12). Sandbox
-  credentials appear configured; production profile not filled.
+- Working tree **clean**, local == `origin/main` @ `5d92c51`.
+- `.env` exists and is populated. Sandbox credentials appear configured;
+  production profile not filled. `KICKSDB_API_KEY` added 2026-07-13
+  (copied from the outlet-plug-blog CLI's `.env`).
+- KicksDB enrichment runtime-verified 2026-07-13: real API round trip
+  (DH6927-140 → Jordan 4 Retro Midnight Navy, $210 retail, released
+  2022-10-29), cache hit on second call, no-overwrite and mismatch guards
+  pass, app boots, backfill + enrich endpoints respond, migration applied
+  to the live DB (all against a scratch DB; the 2 test API calls are the
+  only KicksDB usage so far — `kicksdb_cache` in the live DB is empty).
+- No live item has a style code yet, so nothing has been enriched for real.
+  Next sneaker gist with a `Style:` line will auto-enrich on scan.
 - **Database contents:** 5 items — Rode VideoMic Go (**status: listed** —
   sandbox), Adidas Soccer Metro Sock, Nike Spark, and 2 items with no
   brand/model parsed (ids 3, 4 — likely the JOBY Action Grip and JOBY Wavo
@@ -104,9 +120,9 @@ fallback). Active mode is switched in the UI (`/api/ebay/mode`).
 - `ebay_listing_publications` is **empty** despite the Rode Mic being
   `listed` — the sandbox publish either predated that table or wasn't
   recorded. Worth a look when resuming sandbox work.
-- Not runtime-verified this session (app was not booted on 2026-07-12);
-  last known-good run was the 2026-06-12 session. Python + JS pass syntax
-  checks as of `81526e3`.
+- App booted and smoke-tested 2026-07-13 (`/api/items`, enrich endpoints,
+  DB migration) — but the core intake→research→publish flows have not been
+  re-exercised end-to-end since 2026-06-12.
 
 ---
 
@@ -131,7 +147,15 @@ Intake → research → decide → package → (sandbox) list:
    (Rode Mic). Production is gated (§6).
 6. **Track:** item statuses `pending → needs_info → ready → approved →
    listed → sold → archived`; sale price/fees/shipping/profit recording.
-7. **Extras:** Deal Scout (built 2026-06-12, unused so far — 0 reviews),
+7. **Enrich (KicksDB, added 2026-07-13):** style code → catalog data
+   (brand, model, colorway, retail price, release date, stock image).
+   Cache-first (one API call per unique SKU ever), fill-blanks-only (never
+   overwrites gist values), SKU mismatch guard. Triggers: auto on scan for
+   sneaker imports with a style code, "KicksDB enrich" button in the review
+   overlay, `POST /api/enrich/backfill` one-shot. Net effect: a sneaker
+   gist can shrink to ~3 lines (`Style:` / `Size:` + `Condition:` /
+   `COGS:`) and research gets precise style-code queries.
+8. **Extras:** Deal Scout (built 2026-06-12, unused so far — 0 reviews),
    Production Setup readiness modal, `/api/audit`.
 
 ---
@@ -167,6 +191,11 @@ Intake → research → decide → package → (sandbox) list:
 - [ ] First real listing (requires explicit user go + publish unlock)
 - [ ] Category suggestion API (still using default category ID)
 - [ ] Record publications consistently in `ebay_listing_publications` (§4 gap)
+
+**Step 5.5 — KicksDB enrichment: DONE 2026-07-13** (`5d92c51`). Follow-ons
+(not started): feed `retail_price` into recommend.py as a pricing anchor;
+prefill eBay item aspects (Brand/Style/Colorway) from enriched fields at
+publish time.
 
 **Step 6 — photo workflow:** drag reorder, AI image-quality review.
 **Step 7 — sales/profit:** monthly profit goal dashboard; sale/order sync from eBay.
@@ -217,3 +246,4 @@ scaffold attempted this with Claude Vision; deleted, but the idea stands.)
 | 2026-05-16 | Codex | Initial commit pushed to GitHub; backup plan doc written |
 | 2026-06-12 | Codex | Sandbox listing workflow + mode profiles + deal scout committed; readiness-checklist feature written but left uncommitted; sandbox listing of Rode Mic |
 | 2026-07-12 | Claude Code | Full audit; committed + pushed the stranded readiness-checklist feature (`81526e3`); deleted legacy `/Users/miniman/Epay` scaffold (→ Trash); rewrote this doc as the standing handoff schematic |
+| 2026-07-13 | Claude Code | Pulled `cb5babb` (Documents access restored); built + runtime-verified KicksDB enrichment stage (`5d92c51`): kicksdb.py port, cache table, fill-blanks merge, mismatch guard, scan/button/backfill triggers, UI reference card; `KICKSDB_API_KEY` copied into `.env` |
